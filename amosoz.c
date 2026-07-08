@@ -1262,6 +1262,19 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         }
         return ERR_INVALID;
     }
+    if (strcmp(op, "writefd") == 0) {
+        if (argc < 2) return ERR_INVALID;
+        int fd = atoi(argv[0]);
+        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        if (node < 0) return ERR_NOT_FOUND;
+        char content[MAX_CONTENT] = "";
+        for (int i=1; i<argc; i++) {
+            if (i>1) strncat(content, " ", sizeof(content)-1);
+            strncat(content, argv[i], sizeof(content)-strlen(content)-1);
+        }
+        strncpy(K.fs.nodes[node].content, content, MAX_CONTENT-1);
+        return ERR_OK;
+    }
     if (strcmp(op, "getenv") == 0) {
         if (argc < 1) return ERR_INVALID;
         const char *v = env_get(argv[0]);
@@ -1474,6 +1487,21 @@ static int cmd_readfd(char *out, int sz, int argc, char **argv) {
     if (node < 0) { snprintf(out, sz, "bad fd"); return ERR_NOT_FOUND; }
     if (K.fs.nodes[node].is_dir) return ERR_INVALID;
     snprintf(out, sz, "%s", K.fs.nodes[node].content);
+    return ERR_OK;
+}
+
+static int cmd_writefd(char *out, int sz, int argc, char **argv) {
+    if (argc < 2) { snprintf(out, sz, "Usage: writefd <fd> <content...>"); return ERR_INVALID; }
+    int fd = atoi(argv[0]);
+    int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+    if (node < 0) { snprintf(out, sz, "bad fd"); return ERR_NOT_FOUND; }
+    char content[MAX_CONTENT] = "";
+    for (int i=1; i<argc; i++) {
+        if (i>1) strncat(content, " ", sizeof(content)-1);
+        strncat(content, argv[i], sizeof(content)-strlen(content)-1);
+    }
+    strncpy(K.fs.nodes[node].content, content, MAX_CONTENT-1);
+    snprintf(out, sz, "wrote to fd %d", fd);
     return ERR_OK;
 }
 
@@ -2937,7 +2965,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
