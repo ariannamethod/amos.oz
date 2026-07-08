@@ -762,6 +762,55 @@ static int proc_wait(ProcessTable *pt, int parent_pid, int *status_out) {
     return -1; /* no zombie child */
 }
 
+static int proc_exec(int pid, const char *newname) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            strncpy(K.procs.procs[i].name, newname, 31);
+            /* keep fds, cwd for exec sim; reset sleep */
+            K.procs.procs[i].sleep_ticks = 0;
+            strcpy(K.procs.procs[i].state, "ready");
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* --- Per-process FD table (minimal OS foundation) --- */
+static int alloc_fd(int pid, int node_idx) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            for (int f = 0; f < 32; f++) {
+                if (K.procs.procs[i].open_fds[f] == -1) {
+                    K.procs.procs[i].open_fds[f] = node_idx;
+                    return f;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+static int close_fd(int pid, int fd) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            if (fd >= 0 && fd < 32 && K.procs.procs[i].open_fds[fd] != -1) {
+                K.procs.procs[i].open_fds[fd] = -1;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+static int get_fd_node(int pid, int fd) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            if (fd >= 0 && fd < 32) return K.procs.procs[i].open_fds[fd];
+        }
+    }
+    return -1;
+}
+
 static int proc_tick(ProcessTable *pt) {
     pt->tick_count++;
 
@@ -1175,6 +1224,44 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         }
         return ERR_OK;
     }
+    if (strcmp(op, "open") == 0) {
+        if (argc < 1) return ERR_INVALID;
+        char resolved[MAX_PATH];
+        fs_resolve(&K.fs, argv[0], resolved);
+        int idx = fs_find(&K.fs, resolved);
+        if (idx < 0) return ERR_NOT_FOUND;
+        if (fs_access(&K.fs.nodes[idx], K.user, 'r') != ERR_OK) return ERR_PERMISSION;
+        int fd = alloc_fd(K.current_pid ? K.current_pid : 2, idx);
+        if (fd < 0) return ERR_NO_MEMORY;
+        snprintf(out, outsz, "%d", fd);
+        return ERR_OK;
+    }
+    if (strcmp(op, "close") == 0) {
+        if (argc < 1) return ERR_INVALID;
+        int fd = atoi(argv[0]);
+        if (close_fd(K.current_pid ? K.current_pid : 2, fd) == 0) return ERR_OK;
+        return ERR_INVALID;
+    }
+    if (strcmp(op, "readfd") == 0) {
+        if (argc < 1) return ERR_INVALID;
+        int fd = atoi(argv[0]);
+        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        if (node < 0) return ERR_NOT_FOUND;
+        if (K.fs.nodes[node].is_dir) return ERR_INVALID;
+        snprintf(out, outsz, "%s", K.fs.nodes[node].content);
+        return ERR_OK;
+    }
+    if (strcmp(op, "exec") == 0) {
+        if (argc < 1) return ERR_INVALID;
+        int pid = K.current_pid ? K.current_pid : 2;
+        if (argc > 1) pid = atoi(argv[0]); /* optional pid */
+        const char *name = argv[argc>1 ? 1 : 0];
+        if (proc_exec(pid, name) == 0) {
+            snprintf(out, outsz, "exec %d -> %s", pid, name);
+            return ERR_OK;
+        }
+        return ERR_INVALID;
+    }
     if (strcmp(op, "getenv") == 0) {
         if (argc < 1) return ERR_INVALID;
         const char *v = env_get(argv[0]);
@@ -1356,6 +1443,37 @@ static int cmd_wait(char *out, int sz, int argc, char **argv) {
         return ERR_OK;
     }
     snprintf(out, sz, "reaped PID %d status %d", child, status);
+    return ERR_OK;
+}
+
+static int cmd_open(char *out, int sz, int argc, char **argv) {
+    if (argc < 1) { snprintf(out, sz, "Usage: open <path>"); return ERR_INVALID; }
+    int idx = fs_find(&K.fs, argv[0]);
+    if (idx < 0) { snprintf(out, sz, "not found"); return ERR_NOT_FOUND; }
+    int fd = alloc_fd(K.current_pid ? K.current_pid : 2, idx);
+    if (fd < 0) { snprintf(out, sz, "too many fds"); return ERR_NO_MEMORY; }
+    snprintf(out, sz, "%d", fd);
+    return ERR_OK;
+}
+
+static int cmd_close(char *out, int sz, int argc, char **argv) {
+    if (argc < 1) { snprintf(out, sz, "Usage: close <fd>"); return ERR_INVALID; }
+    int fd = atoi(argv[0]);
+    if (close_fd(K.current_pid ? K.current_pid : 2, fd) == 0) {
+        snprintf(out, sz, "closed %d", fd);
+        return ERR_OK;
+    }
+    snprintf(out, sz, "bad fd");
+    return ERR_INVALID;
+}
+
+static int cmd_readfd(char *out, int sz, int argc, char **argv) {
+    if (argc < 1) { snprintf(out, sz, "Usage: readfd <fd>"); return ERR_INVALID; }
+    int fd = atoi(argv[0]);
+    int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+    if (node < 0) { snprintf(out, sz, "bad fd"); return ERR_NOT_FOUND; }
+    if (K.fs.nodes[node].is_dir) return ERR_INVALID;
+    snprintf(out, sz, "%s", K.fs.nodes[node].content);
     return ERR_OK;
 }
 
@@ -2819,7 +2937,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
