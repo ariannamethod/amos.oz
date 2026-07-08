@@ -1505,6 +1505,18 @@ static int cmd_writefd(char *out, int sz, int argc, char **argv) {
     return ERR_OK;
 }
 
+static int cmd_yield(char *out, int sz, int argc, char **argv) {
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
+            strcpy(K.procs.procs[i].state, "ready");
+            snprintf(out, sz, "PID %d yielded", K.procs.procs[i].pid);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "nothing to yield");
+    return ERR_OK;
+}
+
 static int cmd_tick(char *out, int sz, int argc, char **argv) {
     int t = proc_tick(&K.procs);
     K.hook_sched_fired += fire_hook("sched");
@@ -2965,7 +2977,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
