@@ -1625,6 +1625,17 @@ static int cmd_cat(char *out, int sz, int argc, char **argv) {
         snprintf(out, sz, "Usage: cat <file>");
         return ERR_INVALID;
     }
+    /* support fd if numeric */
+    if (argc >=2 && argv[1][0] >= '0' && argv[1][0] <= '9') {
+        int fd = atoi(argv[1]);
+        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        if (node >=0 && !K.fs.nodes[node].is_dir) {
+            snprintf(out, sz, "%s", K.fs.nodes[node].content);
+            return ERR_OK;
+        }
+        snprintf(out, sz, "cat: bad fd %s", argv[1]);
+        return ERR_NOT_FOUND;
+    }
     int err = kernel_syscall("read", out, sz, 1, &argv[1]);
     if (err == ERR_PERMISSION) snprintf(out, sz, "cat: %s: Permission denied", argv[1]);
     else if (err == ERR_NOT_FOUND) snprintf(out, sz, "cat: %s: not found or not a file", argv[1]);
