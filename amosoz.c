@@ -138,6 +138,7 @@ typedef struct {
     int max_slice;  /* time slice for preemption/fairness */
     int slice_used;
     int mem_limit_kb; /* resource limit for minimal OS */
+    int signals; /* pending signals for IPC/blocking */
 } Process;
 
 typedef struct {
@@ -517,6 +518,15 @@ static int fs_read_to_buf(const char *path, char *buf, int bufsz) {
     if (K.fs.nodes[idx].is_dir || K.fs.nodes[idx].is_symlink) return ERR_INVALID;
     if (fs_access(&K.fs.nodes[idx], K.user, 'r') != ERR_OK) return ERR_PERMISSION;
     if (proc_is_virtual(K.fs.nodes[idx].path)) proc_refresh_all();
+    const char *p = K.fs.nodes[idx].path;
+    if (strcmp(p, "/dev/null") == 0) {
+        buf[0] = '\0';
+        return ERR_OK;
+    }
+    if (strcmp(p, "/dev/zero") == 0) {
+        memset(buf, 0, bufsz);
+        return ERR_OK;
+    }
     strncpy(buf, K.fs.nodes[idx].content, bufsz - 1);
     buf[bufsz - 1] = '\0';
     return ERR_OK;
@@ -704,6 +714,8 @@ static void fs_init_tree(VirtualFS *fs) {
         "#!/amossh\n"
         "echo Script greeting:\n"
         "echo $@\n");
+    fs_add_file(fs, "/dev/null", "");
+    fs_add_file(fs, "/dev/zero", "");
     int hi = fs_find(fs, "/home/user/hello.amos");
     if (hi >= 0) {
         strcpy(fs->nodes[hi].perms, "rwxr-xr-x");
@@ -738,6 +750,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].max_slice = 5;  /* default time slice for fair preemption */
             pt->procs[i].slice_used = 0;
             pt->procs[i].mem_limit_kb = 4096; /* default limit per proc */
+            pt->procs[i].signals = 0;
             return pt->procs[i].pid;
         }
     }
@@ -1198,6 +1211,9 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         if (argc < 2) return ERR_INVALID;
         char resolved[MAX_PATH];
         fs_resolve(&K.fs, argv[0], resolved);
+        if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/zero") == 0) {
+            return ERR_OK; /* devices swallow writes */
+        }
         int idx = fs_find(&K.fs, resolved);
         if (idx >= 0 && fs_access(&K.fs.nodes[idx], K.user, 'w') != ERR_OK) return ERR_PERMISSION;
         char content[MAX_CONTENT] = "";
@@ -1451,7 +1467,7 @@ static int cmd_alloc(char *out, int sz, int argc, char **argv) {
 static int cmd_free(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: free <block_id>"); return ERR_INVALID; }
     int bid = atoi(argv[1]);
-    int err = mem_free(&K.mem, bid, 2);
+    int err = mem_free(&K.mem, bid, K.current_pid);
     if (err != ERR_OK) { snprintf(out, sz, "Error: block %d not found or permission", bid); return err; }
     snprintf(out, sz, "Freed block %d", bid);
     return ERR_OK;
@@ -1685,6 +1701,25 @@ static int cmd_limit(char *out, int sz, int argc, char **argv) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
             K.procs.procs[i].mem_limit_kb = lim;
             snprintf(out, sz, "PID %d mem_limit %d KB", pid, lim);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+static int cmd_signal(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: signal <pid> <sig>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int sig = atoi(argv[2]);
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].signals |= (1 << sig);
+            /* unblock if waiting for signal */
+            if (strcmp(K.procs.procs[i].state, "blocked") == 0) {
+                strcpy(K.procs.procs[i].state, "ready");
+            }
+            snprintf(out, sz, "signaled pid %d sig %d", pid, sig);
             return ERR_OK;
         }
     }
@@ -2543,8 +2578,20 @@ static int cmd_jobs(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_fg(char *out, int sz, int argc, char **argv) {
-    snprintf(out, sz, "fg: job control stub — foreground is always the shell");
-    return ERR_OK;
+    if (argc < 2) { snprintf(out, sz, "Usage: fg <pid>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            /* demote others, make fg running */
+            for (int j=0; j<MAX_PROCS; j++) if (K.procs.procs[j].used && strcmp(K.procs.procs[j].state,"running")==0) strcpy(K.procs.procs[j].state, "ready");
+            K.current_pid = pid;
+            strcpy(K.procs.procs[i].state, "running");
+            snprintf(out, sz, "foreground now pid %d (%s)", pid, K.procs.procs[i].name);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid %d", pid);
+    return ERR_INVALID;
 }
 
 static int cmd_nohup(char *out, int sz, int argc, char **argv) {
@@ -3203,7 +3250,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"current", cmd_current},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"current", cmd_current}, {"signal", cmd_signal},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
