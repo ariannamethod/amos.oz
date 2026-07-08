@@ -135,6 +135,8 @@ typedef struct {
     int owned_block_count;
     int open_fds[32]; /* simple fd table: index into fs nodes or -1 */
     int priority; /* 0 normal, higher = preferred in scheduler */
+    int max_slice;  /* time slice for preemption/fairness */
+    int slice_used;
 } Process;
 
 typedef struct {
@@ -727,6 +729,8 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].owned_block_count = 0;
             for (int f=0; f<32; f++) pt->procs[i].open_fds[f] = -1;
             pt->procs[i].priority = 0;
+            pt->procs[i].max_slice = 5;  /* default time slice for fair preemption */
+            pt->procs[i].slice_used = 0;
             return pt->procs[i].pid;
         }
     }
@@ -840,16 +844,34 @@ static int proc_tick(ProcessTable *pt) {
         }
     }
 
-    /* priority-aware: pick highest prio ready (ties by RR) */
+    /* priority-aware + time slice preemption: full scan + reset */
+    int max_prio = -999;
+    for (int i = 0; i < n; i++) {
+        Process *p = &pt->procs[i];
+        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
+            if (p->slice_used >= p->max_slice) {
+                p->slice_used = 0;
+                strcpy(p->state, "ready");
+            }
+            if (p->priority > max_prio) max_prio = p->priority;
+        }
+    }
     int best_idx = -1;
-    int best_prio = -999;
     for (int i = 0; i < n; i++) {
         int idx = (pt->sched_next + i) % n;
         Process *p = &pt->procs[idx];
-        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
-            if (p->priority > best_prio || (p->priority == best_prio && best_idx == -1)) {
-                best_prio = p->priority;
-                best_idx = idx;
+        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio) {
+            best_idx = idx;
+            break;
+        }
+    }
+    if (best_idx < 0) {
+        /* full scan fallback */
+        for (int i = 0; i < n; i++) {
+            Process *p = &pt->procs[i];
+            if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio) {
+                best_idx = i;
+                break;
             }
         }
     }
@@ -863,7 +885,15 @@ static int proc_tick(ProcessTable *pt) {
         Process *p = &pt->procs[best_idx];
         strcpy(p->state, "running");
         p->ticks++;
+        p->slice_used++;
         K.current_pid = p->pid;
+
+        /* if just exhausted, reset for next */
+        if (p->slice_used >= p->max_slice) {
+            p->slice_used = 0;
+            strcpy(p->state, "ready");
+        }
+
         pt->sched_next = (best_idx + 1) % n;
         return pt->tick_count;
     }
@@ -1592,6 +1622,23 @@ static int cmd_nice(char *out, int sz, int argc, char **argv) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
             K.procs.procs[i].priority = prio;
             snprintf(out, sz, "PID %d priority %d", pid, prio);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+static int cmd_slice(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: slice <pid> <ticks>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int sl = atoi(argv[2]);
+    if (sl <= 0) { snprintf(out, sz, "slice must be >0"); return ERR_INVALID; }
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].max_slice = sl;
+            K.procs.procs[i].slice_used = 0;
+            snprintf(out, sz, "PID %d max_slice %d", pid, sl);
             return ERR_OK;
         }
     }
@@ -2579,9 +2626,17 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     dispatch("echo selftest_token", tmp, sizeof(tmp));
     CHECK("command_dispatch", strstr(tmp, "selftest_token") != NULL);
 
-    /* Process table */
+    /* Process table + scheduler time slices */
     int tpid = proc_spawn(&K.procs, "test_proc", 0);
     CHECK("process_spawn", tpid > 0);
+    /* set small slice to test preemption */
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == tpid) { K.procs.procs[i].max_slice=2; K.procs.procs[i].slice_used=0; }
+    proc_tick(&K.procs);
+    proc_tick(&K.procs);
+    /* after 2 ticks should have forced ready */
+    int forced_ready = 0;
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == tpid && strcmp(K.procs.procs[i].state, "ready")==0) forced_ready=1;
+    CHECK("slice_preempt", forced_ready);
     proc_kill(&K.procs, tpid, 0);
     /* for test, force reap by clearing */
     for (int i = 0; i < MAX_PROCS; i++)
@@ -3070,7 +3125,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
