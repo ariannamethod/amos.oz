@@ -252,6 +252,7 @@ typedef struct {
     int job_count;
     char fortune_oz_idx;
     int current_pid; /* the one the scheduler picked as running - for syscall context */
+    int suppress_next_auto_tick; /* fg etc stick for next cmd */
 } Kernel;
 
 static Kernel K;
@@ -1345,6 +1346,7 @@ static void kernel_init(void) {
     K.job_count = 1;
     K.fortune_oz_idx = 0;
     K.current_pid = sh > 0 ? sh : 0; /* initial current the shell */
+    K.suppress_next_auto_tick = 0;
     snprintf(K.boot_log, sizeof(K.boot_log),
         "[boot] amosOZ %s started\n[boot] %d hook subscribers on boot\n"
         "[boot] dedicated to Amos Oz (עוז)\n",
@@ -1443,7 +1445,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     }
     if (strcmp(op, "free") == 0) {
         if (argc < 1) return ERR_INVALID;
-        return mem_free(&K.mem, atoi(argv[0]), 2); /* shell */
+        return mem_free(&K.mem, atoi(argv[0]), K.current_pid); /* current */
     }
     if (strcmp(op, "spawn") == 0) {
         if (argc < 1) return ERR_INVALID;
@@ -1657,8 +1659,8 @@ static int cmd_ps(char *out, int sz, int argc, char **argv) {
 
 static int cmd_run(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: run <name>"); return ERR_INVALID; }
-    int parent = K.current_pid;
-    int pid = proc_spawn(&K.procs, argv[1], parent); /* current as parent */
+    int parent = 2; /* always user shell as parent for run */
+    int pid = proc_spawn(&K.procs, argv[1], parent);
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Started process '%s' with PID %d", argv[1], pid);
     return ERR_OK;
@@ -1666,9 +1668,9 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
 
 static int cmd_fork(char *out, int sz, int argc, char **argv) {
     /* fork: clone state for minimal OS foundation (fds, cwd, limits, signals mask, prio, slice) */
-    int parent = K.current_pid;
+    int parent = 2; /* user shell parents user forks */
     Process *p = NULL;
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) { p = &K.procs.procs[i]; break; }
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) { p = &K.procs.procs[i]; break; }
     if (!p) p = &K.procs.procs[1];
     int newpid = proc_spawn(&K.procs, p->name, parent);
     if (newpid < 0) { snprintf(out, sz, "fork failed"); return ERR_NO_MEMORY; }
@@ -1741,24 +1743,31 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
-    int parent = K.current_pid;
+    int parents[2] = {K.current_pid, 2};
     int status = 0;
-    int child = proc_wait(&K.procs, parent, &status);
+    int child = -1;
+    for (int p=0; p<2 && child<0; p++) {
+        if (parents[p] > 0) child = proc_wait(&K.procs, parents[p], &status);
+    }
     if (child >= 0) {
         snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
     }
-    /* blocking wait: set caller blocked and tick until child or limit */
+    /* blocking wait: set caller (shell) blocked and tick until child or limit */
+    int waiter = 2;
     for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == waiter) {
             strcpy(K.procs.procs[i].state, "blocked");
-            K.procs.procs[i].sleep_ticks = 100; /* max wait ticks */
+            K.procs.procs[i].sleep_ticks = 100;
             break;
         }
     }
     for (int t=0; t<100; t++) {
         proc_tick(&K.procs);
-        child = proc_wait(&K.procs, parent, &status);
+        child = -1;
+        for (int p=0; p<2 && child<0; p++) {
+            if (parents[p] > 0) child = proc_wait(&K.procs, parents[p], &status);
+        }
         if (child >= 0) {
             snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
             return ERR_OK;
@@ -2839,6 +2848,9 @@ static int cmd_fg(char *out, int sz, int argc, char **argv) {
             for (int j=0; j<MAX_PROCS; j++) if (K.procs.procs[j].used && strcmp(K.procs.procs[j].state,"running")==0) strcpy(K.procs.procs[j].state, "ready");
             K.current_pid = pid;
             strcpy(K.procs.procs[i].state, "running");
+            /* bias scheduler to start from this for next tick */
+            for (int j=0; j<MAX_PROCS; j++) if (K.procs.procs[j].pid == pid) { K.procs.sched_next = j; break; }
+            K.suppress_next_auto_tick = 1; /* stick current for next user command */
             snprintf(out, sz, "foreground now pid %d (%s)", pid, K.procs.procs[i].name);
             return ERR_OK;
         }
@@ -3484,6 +3496,14 @@ static int cmd_which(char *out, int sz, int argc, char **argv) {
 
 static int cmd_exec(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: exec <path> [args...]"); return ERR_INVALID; }
+    /* first try as image replace (for 'exec newname') */
+    if (strchr(argv[1], '/') == NULL) {
+        int err = proc_exec(K.current_pid ? K.current_pid : 2, argv[1]);
+        if (err == 0) {
+            snprintf(out, sz, "exec image to %s", argv[1]);
+            return ERR_OK;
+        }
+    }
     char resolved[MAX_PATH];
     int idx = path_lookup_executable(argv[1], resolved);
     if (idx < 0) {
@@ -3558,7 +3578,10 @@ int main(int argc, char **argv) {
         dispatch(line, output, sizeof(output));
         if (output[0]) printf("%s\n", output);
         /* auto time advance for preemption and blocking simulation */
-        proc_tick(&K.procs);
+        if (!K.suppress_next_auto_tick) {
+            proc_tick(&K.procs);
+        }
+        K.suppress_next_auto_tick = 0;
     }
     return 0;
 }
