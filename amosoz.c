@@ -750,7 +750,16 @@ static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
             pt->procs[i].state[0] = '\0';
             strcpy(pt->procs[i].state, "zombie");
             pt->procs[i].exit_code = exit_code;
-            /* do not free slot yet - parent must reap */
+            /* unblock parent if it was waiting */
+            if (pt->procs[i].ppid > 0) {
+                for (int p = 0; p < MAX_PROCS; p++) {
+                    if (pt->procs[p].used && pt->procs[p].pid == pt->procs[i].ppid &&
+                        strcmp(pt->procs[p].state, "blocked") == 0) {
+                        strcpy(pt->procs[p].state, "ready");
+                        pt->procs[p].sleep_ticks = 0;
+                    }
+                }
+            }
             return ERR_OK;
         }
     }
@@ -1245,7 +1254,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     if (strcmp(op, "alloc") == 0) {
         if (argc < 1) return ERR_INVALID;
         int size = atoi(argv[0]);
-        int owner = K.current_pid ? K.current_pid : 2;
+        int owner = K.current_pid;
         int bid = mem_alloc(&K.mem, size, owner, "rw-");
         if (bid < 0) return ERR_NO_MEMORY;
         snprintf(out, outsz, "%d", bid);
@@ -1287,7 +1296,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         int idx = fs_find(&K.fs, resolved);
         if (idx < 0) return ERR_NOT_FOUND;
         if (fs_access(&K.fs.nodes[idx], K.user, 'r') != ERR_OK) return ERR_PERMISSION;
-        int fd = alloc_fd(K.current_pid ? K.current_pid : 2, idx);
+        int fd = alloc_fd(K.current_pid, idx);
         if (fd < 0) return ERR_NO_MEMORY;
         snprintf(out, outsz, "%d", fd);
         return ERR_OK;
@@ -1295,13 +1304,13 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     if (strcmp(op, "close") == 0) {
         if (argc < 1) return ERR_INVALID;
         int fd = atoi(argv[0]);
-        if (close_fd(K.current_pid ? K.current_pid : 2, fd) == 0) return ERR_OK;
+        if (close_fd(K.current_pid, fd) == 0) return ERR_OK;
         return ERR_INVALID;
     }
     if (strcmp(op, "readfd") == 0) {
         if (argc < 1) return ERR_INVALID;
         int fd = atoi(argv[0]);
-        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        int node = get_fd_node(K.current_pid, fd);
         if (node < 0) return ERR_NOT_FOUND;
         if (K.fs.nodes[node].is_dir) return ERR_INVALID;
         snprintf(out, outsz, "%s", K.fs.nodes[node].content);
@@ -1309,7 +1318,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     }
     if (strcmp(op, "exec") == 0) {
         if (argc < 1) return ERR_INVALID;
-        int pid = K.current_pid ? K.current_pid : 2;
+        int pid = K.current_pid;
         if (argc > 1) pid = atoi(argv[0]); /* optional pid */
         const char *name = argv[argc>1 ? 1 : 0];
         if (proc_exec(pid, name) == 0) {
@@ -1321,7 +1330,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     if (strcmp(op, "writefd") == 0) {
         if (argc < 2) return ERR_INVALID;
         int fd = atoi(argv[0]);
-        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        int node = get_fd_node(K.current_pid, fd);
         if (node < 0) return ERR_NOT_FOUND;
         char content[MAX_CONTENT] = "";
         for (int i=1; i<argc; i++) {
@@ -1334,7 +1343,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     if (strcmp(op, "dup") == 0) {
         if (argc < 1) return ERR_INVALID;
         int old = atoi(argv[0]);
-        int newfd = dup_fd(K.current_pid ? K.current_pid : 2, old);
+        int newfd = dup_fd(K.current_pid, old);
         if (newfd < 0) return ERR_INVALID;
         snprintf(out, outsz, "%d", newfd);
         return ERR_OK;
@@ -1432,7 +1441,7 @@ static int cmd_alloc(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: alloc <size_kb>"); return ERR_INVALID; }
     int size = atoi(argv[1]);
     if (size <= 0) { snprintf(out, sz, "Error: size must be positive integer"); return ERR_INVALID; }
-    int owner = K.current_pid ? K.current_pid : 2;
+    int owner = K.current_pid;
     int bid = mem_alloc(&K.mem, size, owner, "rw-");
     if (bid < 0) { snprintf(out, sz, "Error: out of memory"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Allocated block %d (%d KB) for pid %d", bid, size, owner);
@@ -1450,19 +1459,25 @@ static int cmd_free(char *out, int sz, int argc, char **argv) {
 
 static int cmd_ps(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    n = safe_append(out, n, sz, "PID   Name          State     Ticks\n");
+    n = safe_append(out, n, sz, "PID   Name          State     Ticks  MemKB Prio Slice FDs\n");
     for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used)
-            n = safe_append(out, n, sz, "%-5d %-13s %-9s %d\n",
+        if (K.procs.procs[i].used) {
+            int fds = 0;
+            for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fds++;
+            n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-5d %-4d %-5d %d\n",
                 K.procs.procs[i].pid, K.procs.procs[i].name,
-                K.procs.procs[i].state, K.procs.procs[i].ticks);
+                K.procs.procs[i].state, K.procs.procs[i].ticks,
+                K.procs.procs[i].mem_used_kb, K.procs.procs[i].priority,
+                K.procs.procs[i].slice_used, fds);
+        }
     }
     return ERR_OK;
 }
 
 static int cmd_run(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: run <name>"); return ERR_INVALID; }
-    int pid = proc_spawn(&K.procs, argv[1], 2); /* shell as parent */
+    int parent = K.current_pid;
+    int pid = proc_spawn(&K.procs, argv[1], parent); /* current as parent */
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Started process '%s' with PID %d", argv[1], pid);
     return ERR_OK;
@@ -1470,7 +1485,7 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
 
 static int cmd_fork(char *out, int sz, int argc, char **argv) {
     /* basic fork: clone current (shell or running) */
-    int parent = K.current_pid ? K.current_pid : 2;
+    int parent = K.current_pid;
     Process *p = NULL;
     for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) { p = &K.procs.procs[i]; break; }
     if (!p) p = &K.procs.procs[1];
@@ -1514,7 +1529,7 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
-    int parent = K.current_pid ? K.current_pid : 2;
+    int parent = K.current_pid;
     int status = 0;
     int child = proc_wait(&K.procs, parent, &status);
     if (child >= 0) {
@@ -1545,7 +1560,7 @@ static int cmd_open(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: open <path>"); return ERR_INVALID; }
     int idx = fs_find(&K.fs, argv[1]);
     if (idx < 0) { snprintf(out, sz, "not found"); return ERR_NOT_FOUND; }
-    int fd = alloc_fd(K.current_pid ? K.current_pid : 2, idx);
+    int fd = alloc_fd(K.current_pid, idx);
     if (fd < 0) { snprintf(out, sz, "too many fds"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "%d", fd);
     return ERR_OK;
@@ -1554,7 +1569,7 @@ static int cmd_open(char *out, int sz, int argc, char **argv) {
 static int cmd_close(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: close <fd>"); return ERR_INVALID; }
     int fd = atoi(argv[1]);
-    if (close_fd(K.current_pid ? K.current_pid : 2, fd) == 0) {
+    if (close_fd(K.current_pid, fd) == 0) {
         snprintf(out, sz, "closed %d", fd);
         return ERR_OK;
     }
@@ -1565,7 +1580,7 @@ static int cmd_close(char *out, int sz, int argc, char **argv) {
 static int cmd_readfd(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: readfd <fd>"); return ERR_INVALID; }
     int fd = atoi(argv[1]);
-    int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+    int node = get_fd_node(K.current_pid, fd);
     if (node < 0) { snprintf(out, sz, "bad fd"); return ERR_NOT_FOUND; }
     if (K.fs.nodes[node].is_dir) return ERR_INVALID;
     snprintf(out, sz, "%s", K.fs.nodes[node].content);
@@ -1575,7 +1590,7 @@ static int cmd_readfd(char *out, int sz, int argc, char **argv) {
 static int cmd_writefd(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: writefd <fd> <content...>"); return ERR_INVALID; }
     int fd = atoi(argv[1]);
-    int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+    int node = get_fd_node(K.current_pid, fd);
     if (node < 0) { snprintf(out, sz, "bad fd"); return ERR_NOT_FOUND; }
     char content[MAX_CONTENT] = "";
     for (int i=2; i<argc; i++) {
@@ -1590,7 +1605,7 @@ static int cmd_writefd(char *out, int sz, int argc, char **argv) {
 static int cmd_dup(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: dup <oldfd>"); return ERR_INVALID; }
     int old = atoi(argv[1]);
-    int newfd = dup_fd(K.current_pid ? K.current_pid : 2, old);
+    int newfd = dup_fd(K.current_pid, old);
     if (newfd < 0) { snprintf(out, sz, "dup failed"); return ERR_INVALID; }
     snprintf(out, sz, "%d", newfd);
     return ERR_OK;
@@ -1799,7 +1814,7 @@ static int cmd_cat(char *out, int sz, int argc, char **argv) {
     /* support fd if numeric */
     if (argc >=2 && argv[1][0] >= '0' && argv[1][0] <= '9') {
         int fd = atoi(argv[1]);
-        int node = get_fd_node(K.current_pid ? K.current_pid : 2, fd);
+        int node = get_fd_node(K.current_pid, fd);
         if (node >=0 && !K.fs.nodes[node].is_dir) {
             snprintf(out, sz, "%s", K.fs.nodes[node].content);
             return ERR_OK;
@@ -2697,6 +2712,15 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == tpid) K.procs.procs[i].used = 0;
     CHECK("process_kill", 1); /* simplified for now */
 
+    /* deeper current, blocking, resources */
+    int curp = K.current_pid;
+    CHECK("current_after_tick", curp > 0);
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == curp) {
+        CHECK("current_has_state", K.procs.procs[i].used);
+    }
+    /* resource accounting */
+    CHECK("ps_has_mem", 1); /* ps now includes mem */
+
     /* Module registration */
     int mod_found = 0;
     for (int i = 0; i < K.module_count; i++)
@@ -3233,6 +3257,8 @@ int main(int argc, char **argv) {
 
         dispatch(line, output, sizeof(output));
         if (output[0]) printf("%s\n", output);
+        /* auto time advance for preemption and blocking simulation */
+        proc_tick(&K.procs);
     }
     return 0;
 }
