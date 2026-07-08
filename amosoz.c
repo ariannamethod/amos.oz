@@ -137,6 +137,7 @@ typedef struct {
     int priority; /* 0 normal, higher = preferred in scheduler */
     int max_slice;  /* time slice for preemption/fairness */
     int slice_used;
+    int mem_limit_kb; /* resource limit for minimal OS */
 } Process;
 
 typedef struct {
@@ -383,9 +384,18 @@ static int mem_alloc(VirtualMemory *m, int size, int owner_pid, const char *flag
     /* for tests or early boot allow without owner proc, but prefer real */
     if (!owner) {
         /* fallback: global alloc without per-proc charge for compatibility */
+        int idx = m->block_count++;
+        m->blocks[idx].id = m->next_id++;
+        m->blocks[idx].size = size;
+        snprintf(m->blocks[idx].owner, sizeof(m->blocks[idx].owner), "%d", owner_pid);
+        strncpy(m->blocks[idx].flags, flags, 7);
+        m->blocks[idx].used = 1;
+        m->used_kb += size;
+        return m->blocks[idx].id;
     }
 
     if (owner->owned_block_count >= MAX_BLOCKS) return -1;
+    if (owner->mem_used_kb + size > owner->mem_limit_kb) return -1; /* per-proc limit */
 
     int idx = m->block_count++;
     m->blocks[idx].id = m->next_id++;
@@ -395,13 +405,9 @@ static int mem_alloc(VirtualMemory *m, int size, int owner_pid, const char *flag
     m->blocks[idx].used = 1;
     m->used_kb += size;
 
-    /* charge to process if we have owner */
-    if (owner) {
-        owner->mem_used_kb += size;
-        if (owner->owned_block_count < MAX_BLOCKS) {
-            owner->owned_blocks[owner->owned_block_count++] = m->blocks[idx].id;
-        }
-    }
+    /* charge to process */
+    owner->mem_used_kb += size;
+    owner->owned_blocks[owner->owned_block_count++] = m->blocks[idx].id;
 
     return m->blocks[idx].id;
 }
@@ -731,6 +737,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].priority = 0;
             pt->procs[i].max_slice = 5;  /* default time slice for fair preemption */
             pt->procs[i].slice_used = 0;
+            pt->procs[i].mem_limit_kb = 4096; /* default limit per proc */
             return pt->procs[i].pid;
         }
     }
@@ -1147,13 +1154,13 @@ static void kernel_init(void) {
     env_set("HOSTNAME", K.hw.hostname);
 
     proc_spawn(&K.procs, "init", 0);
-    proc_spawn(&K.procs, "amossh", 1);  /* init is parent */
+    int sh = proc_spawn(&K.procs, "amossh", 1);  /* init is parent */
 
     K.hook_boot_fired = fire_hook("boot");
     K.hook_sched_fired = 0;
     K.job_count = 1;
     K.fortune_oz_idx = 0;
-    K.current_pid = 2; /* initial shell */
+    K.current_pid = sh > 0 ? sh : 0; /* initial current the shell */
     snprintf(K.boot_log, sizeof(K.boot_log),
         "[boot] amosOZ %s started\n[boot] %d hook subscribers on boot\n"
         "[boot] dedicated to Amos Oz (עוז)\n",
@@ -1507,16 +1514,24 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
+    int parent = K.current_pid ? K.current_pid : 2;
     int status = 0;
-    int child = proc_wait(&K.procs, 2, &status); /* approx parent = shell pid 2 */
+    int child = proc_wait(&K.procs, parent, &status);
     if (child >= 0) {
         snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
     }
-    /* blocking wait: tick until child or limit */
+    /* blocking wait: set caller blocked and tick until child or limit */
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) {
+            strcpy(K.procs.procs[i].state, "blocked");
+            K.procs.procs[i].sleep_ticks = 100; /* max wait ticks */
+            break;
+        }
+    }
     for (int t=0; t<100; t++) {
         proc_tick(&K.procs);
-        child = proc_wait(&K.procs, 2, &status);
+        child = proc_wait(&K.procs, parent, &status);
         if (child >= 0) {
             snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
             return ERR_OK;
@@ -1644,6 +1659,33 @@ static int cmd_slice(char *out, int sz, int argc, char **argv) {
     }
     snprintf(out, sz, "no such pid");
     return ERR_INVALID;
+}
+
+static int cmd_limit(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: limit <pid> <kb>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int lim = atoi(argv[2]);
+    if (lim <= 0) { snprintf(out, sz, "limit must be >0"); return ERR_INVALID; }
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].mem_limit_kb = lim;
+            snprintf(out, sz, "PID %d mem_limit %d KB", pid, lim);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+static int cmd_current(char *out, int sz, int argc, char **argv) {
+    snprintf(out, sz, "current pid: %d", K.current_pid);
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
+            snprintf(out, sz, "current pid: %d (%s) state=%s", K.current_pid, K.procs.procs[i].name, K.procs.procs[i].state);
+            break;
+        }
+    }
+    return ERR_OK;
 }
 
 static int cmd_tick(char *out, int sz, int argc, char **argv) {
@@ -2615,11 +2657,23 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     CHECK("hook_boot_fired", K.hook_boot_fired > 0);
     CHECK("contract_validation", validate_module_contracts() == ERR_OK);
 
-    /* Memory */
+    /* current context */
+    CHECK("current_pid_set", K.current_pid > 0);
+    int cur_found = 0;
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) cur_found = 1;
+    CHECK("current_proc_exists", cur_found);
+
+    /* Memory + limits */
     int bid = mem_alloc(&K.mem, 100, 1, "rw-"); /* use init pid */
     CHECK("mem_alloc", bid > 0);
     int merr = mem_free(&K.mem, bid, 1);
     CHECK("mem_free", merr == ERR_OK);
+
+    /* test limit */
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == 1) K.procs.procs[i].mem_limit_kb = 50;
+    bid = mem_alloc(&K.mem, 100, 1, "rw-");
+    CHECK("mem_limit_enforced", bid < 0); /* should fail */
+    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == 1) K.procs.procs[i].mem_limit_kb = 4096; /* restore */
 
     /* Command dispatch */
     char tmp[1024];
@@ -3125,7 +3179,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"current", cmd_current},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
