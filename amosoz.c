@@ -529,10 +529,13 @@ static int fs_read_to_buf(const char *path, char *buf, int bufsz) {
         memset(buf, 0, bufsz);
         return ERR_OK;
     }
-    if (strcmp(p, "/dev/random") == 0) {
+    if (strcmp(p, "/dev/random") == 0 || strcmp(p, "/dev/urandom") == 0) {
         /* simple pseudo-random for minimal OS */
+        static unsigned seed = 0;
+        if (seed == 0) seed = (unsigned)time(NULL);
         for (int k = 0; k < bufsz-1; k++) {
-            buf[k] = (char)((k * 37 + time(NULL)) & 0xff);
+            seed = seed * 1103515245 + 12345;
+            buf[k] = (char)((seed >> 16) & 0xff);
         }
         buf[bufsz-1] = '\0';
         return ERR_OK;
@@ -682,6 +685,24 @@ static void proc_refresh_all(void) {
             }
             if (pos == 0) strcpy(fdlist, "(no open fds)\n");
             proc_write_file(fdpath, fdlist);
+
+            /* /proc/<pid>/cpu - cpu accounting */
+            char cpupath[MAX_PATH];
+            snprintf(cpupath, sizeof(cpupath), "/proc/%d/cpu", pid);
+            snprintf(buf, sizeof(buf),
+                "cpu_time: %d\ncpu_limit: %d\npriority: %d\nslice_used: %d\nmax_slice: %d\n",
+                K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
+                K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice);
+            proc_write_file(cpupath, buf);
+
+            /* /proc/<pid>/mem - memory accounting */
+            char mempath[MAX_PATH];
+            snprintf(mempath, sizeof(mempath), "/proc/%d/mem", pid);
+            snprintf(buf, sizeof(buf),
+                "mem_used_kb: %d\nmem_limit_kb: %d\nowned_blocks: %d\n",
+                K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
+                K.procs.procs[i].owned_block_count);
+            proc_write_file(mempath, buf);
         }
     }
 }
@@ -778,6 +799,7 @@ static void fs_init_tree(VirtualFS *fs) {
     fs_add_file(fs, "/dev/zero", "");
     fs_add_file(fs, "/dev/full", "");
     fs_add_file(fs, "/dev/random", "");
+    fs_add_file(fs, "/dev/urandom", "");
     int hi = fs_find(fs, "/home/user/hello.amos");
     if (hi >= 0) {
         strcpy(fs->nodes[hi].perms, "rwxr-xr-x");
@@ -947,6 +969,14 @@ static int proc_tick(ProcessTable *pt) {
             } else if (pt->procs[i].signals & (1 << 15)) { /* SIGTERM */
                 strcpy(pt->procs[i].state, "zombie");
                 pt->procs[i].exit_code = 15;
+                pt->procs[i].signals = 0;
+            } else if (pt->procs[i].signals & (1 << 19)) { /* SIGSTOP */
+                strcpy(pt->procs[i].state, "stopped");
+                pt->procs[i].signals = 0;
+            } else if (pt->procs[i].signals & (1 << 18)) { /* SIGCONT */
+                if (strcmp(pt->procs[i].state, "stopped") == 0) {
+                    strcpy(pt->procs[i].state, "ready");
+                }
                 pt->procs[i].signals = 0;
             } else {
                 /* other signals just unblock */
