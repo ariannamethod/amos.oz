@@ -141,6 +141,7 @@ typedef struct {
     int signals; /* pending signals for IPC/blocking */
     int cpu_time; /* cpu time consumed while running (foundation accounting) */
     int cpu_limit; /* hard cpu time limit (ticks) - enforce in scheduler */
+    int cpu_violations; /* count of times limit was hit */
 } Process;
 
 typedef struct {
@@ -646,7 +647,7 @@ static void proc_refresh_all(void) {
             snprintf(ppath, sizeof(ppath), "/proc/%d/status", pid);
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
-                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
+                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
                 "Mem:\t%d/%d kB\nSignals:\t%d\nFds:\t%d\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
@@ -662,11 +663,11 @@ static void proc_refresh_all(void) {
             /* rebuild with fcount */
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
-                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
+                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
                 "Mem:\t%d/%d kB\nSignals:\t%d\nFds:\t%d\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
-                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
+                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit, K.procs.procs[i].cpu_violations,
                 K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
                 K.procs.procs[i].signals, fcount);
@@ -837,6 +838,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].signals = 0;
             pt->procs[i].cpu_time = 0;
             pt->procs[i].cpu_limit = 100000; /* default high cpu limit */
+            pt->procs[i].cpu_violations = 0;
             return pt->procs[i].pid;
         }
     }
@@ -1030,6 +1032,7 @@ static int proc_tick(ProcessTable *pt) {
 
         /* enforce cpu limit - hardcore resource limit */
         if (p->cpu_time >= p->cpu_limit) {
+            p->cpu_violations++;
             strcpy(p->state, "stopped");
             pt->sched_next = (best_idx + 1) % n;
             return pt->tick_count;
