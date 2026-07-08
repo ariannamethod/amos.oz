@@ -140,6 +140,7 @@ typedef struct {
     int mem_limit_kb; /* resource limit for minimal OS */
     int signals; /* pending signals for IPC/blocking */
     int cpu_time; /* cpu time consumed while running (foundation accounting) */
+    int cpu_limit; /* hard cpu time limit (ticks) - enforce in scheduler */
 } Process;
 
 typedef struct {
@@ -524,8 +525,16 @@ static int fs_read_to_buf(const char *path, char *buf, int bufsz) {
         buf[0] = '\0';
         return ERR_OK;
     }
-    if (strcmp(p, "/dev/zero") == 0) {
+    if (strcmp(p, "/dev/zero") == 0 || strcmp(p, "/dev/full") == 0) {
         memset(buf, 0, bufsz);
+        return ERR_OK;
+    }
+    if (strcmp(p, "/dev/random") == 0) {
+        /* simple pseudo-random for minimal OS */
+        for (int k = 0; k < bufsz-1; k++) {
+            buf[k] = (char)((k * 37 + time(NULL)) & 0xff);
+        }
+        buf[bufsz-1] = '\0';
         return ERR_OK;
     }
     strncpy(buf, K.fs.nodes[idx].content, bufsz - 1);
@@ -634,31 +643,45 @@ static void proc_refresh_all(void) {
             snprintf(ppath, sizeof(ppath), "/proc/%d/status", pid);
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
-                "Ticks:\t%d\nCpuTime:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
+                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
                 "Mem:\t%d/%d kB\nSignals:\t%d\nFds:\t%d\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
-                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time,
+                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
                 K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
                 K.procs.procs[i].signals,
                 /* count open fds */
-                (int[]){0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}[0] /* dummy, count below */ );
+                0 /* will be overwritten */ );
             /* count fds */
             int fcount = 0;
             for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fcount++;
             /* rebuild with fcount */
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
-                "Ticks:\t%d\nCpuTime:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
+                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
                 "Mem:\t%d/%d kB\nSignals:\t%d\nFds:\t%d\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
-                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time,
+                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
                 K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
                 K.procs.procs[i].signals, fcount);
             proc_write_file(ppath, buf);
+
+            /* /proc/<pid>/fd list */
+            char fdpath[MAX_PATH];
+            snprintf(fdpath, sizeof(fdpath), "/proc/%d/fd", pid);
+            char fdlist[MAX_CONTENT] = "";
+            int pos = 0;
+            for (int f=0; f<32; f++) {
+                int node = K.procs.procs[i].open_fds[f];
+                if (node >= 0) {
+                    pos += snprintf(fdlist + pos, sizeof(fdlist)-pos, "%d -> %s\n", f, K.fs.nodes[node].path);
+                }
+            }
+            if (pos == 0) strcpy(fdlist, "(no open fds)\n");
+            proc_write_file(fdpath, fdlist);
         }
     }
 }
@@ -753,6 +776,8 @@ static void fs_init_tree(VirtualFS *fs) {
         "echo $@\n");
     fs_add_file(fs, "/dev/null", "");
     fs_add_file(fs, "/dev/zero", "");
+    fs_add_file(fs, "/dev/full", "");
+    fs_add_file(fs, "/dev/random", "");
     int hi = fs_find(fs, "/home/user/hello.amos");
     if (hi >= 0) {
         strcpy(fs->nodes[hi].perms, "rwxr-xr-x");
@@ -789,6 +814,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].mem_limit_kb = 4096; /* default limit per proc */
             pt->procs[i].signals = 0;
             pt->procs[i].cpu_time = 0;
+            pt->procs[i].cpu_limit = 100000; /* default high cpu limit */
             return pt->procs[i].pid;
         }
     }
@@ -950,6 +976,14 @@ static int proc_tick(ProcessTable *pt) {
             }
         }
         Process *p = &pt->procs[best_idx];
+
+        /* enforce cpu limit - hardcore resource limit */
+        if (p->cpu_time >= p->cpu_limit) {
+            strcpy(p->state, "stopped");
+            pt->sched_next = (best_idx + 1) % n;
+            return pt->tick_count;
+        }
+
         strcpy(p->state, "running");
         p->ticks++;
         p->cpu_time++;
@@ -1250,8 +1284,11 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         if (argc < 2) return ERR_INVALID;
         char resolved[MAX_PATH];
         fs_resolve(&K.fs, argv[0], resolved);
-        if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/zero") == 0) {
+        if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/zero") == 0 || strcmp(resolved, "/dev/random") == 0) {
             return ERR_OK; /* devices swallow writes */
+        }
+        if (strcmp(resolved, "/dev/full") == 0) {
+            return ERR_NO_MEMORY; /* full, like ENOSPC */
         }
         int idx = fs_find(&K.fs, resolved);
         if (idx >= 0 && fs_access(&K.fs.nodes[idx], K.user, 'w') != ERR_OK) return ERR_PERMISSION;
@@ -1514,14 +1551,14 @@ static int cmd_free(char *out, int sz, int argc, char **argv) {
 
 static int cmd_ps(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    n = safe_append(out, n, sz, "PID   Name          State     Ticks CpuTime MemKB Prio Slice FDs\n");
+    n = safe_append(out, n, sz, "PID   Name          State     Ticks CpuTime CpuLim MemKB Prio Slice FDs\n");
     for (int i = 0; i < MAX_PROCS; i++) {
         if (K.procs.procs[i].used) {
             int fds = 0;
             for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fds++;
-            n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-7d %-5d %-4d %-5d %d\n",
+            n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-7d %-6d %-5d %-4d %-5d %d\n",
                 K.procs.procs[i].pid, K.procs.procs[i].name,
-                K.procs.procs[i].state, K.procs.procs[i].ticks, K.procs.procs[i].cpu_time,
+                K.procs.procs[i].state, K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].priority,
                 K.procs.procs[i].slice_used, fds);
         }
@@ -1559,7 +1596,24 @@ static int cmd_fork(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_kill(char *out, int sz, int argc, char **argv) {
-    if (argc < 2) { snprintf(out, sz, "Usage: kill <pid>"); return ERR_INVALID; }
+    if (argc < 2) { snprintf(out, sz, "Usage: kill <pid> | kill -s <sig> <pid>"); return ERR_INVALID; }
+    if (argc >= 4 && strcmp(argv[1], "-s") == 0) {
+        int sig = atoi(argv[2]);
+        int pid = atoi(argv[3]);
+        /* deliver signal */
+        for (int i=0; i<MAX_PROCS; i++) {
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+                K.procs.procs[i].signals |= (1 << sig);
+                if (strcmp(K.procs.procs[i].state, "blocked") == 0) {
+                    strcpy(K.procs.procs[i].state, "ready");
+                }
+                snprintf(out, sz, "signaled %d sig %d", pid, sig);
+                return ERR_OK;
+            }
+        }
+        snprintf(out, sz, "no such pid");
+        return ERR_INVALID;
+    }
     int pid = atoi(argv[1]);
     int err = proc_kill(&K.procs, pid, 0);
     if (err != ERR_OK) { snprintf(out, sz, "Error: process %d not found", pid); return err; }
@@ -1740,6 +1794,23 @@ static int cmd_limit(char *out, int sz, int argc, char **argv) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
             K.procs.procs[i].mem_limit_kb = lim;
             snprintf(out, sz, "PID %d mem_limit %d KB", pid, lim);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+static int cmd_climit(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: climit <pid> <ticks>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int lim = atoi(argv[2]);
+    if (lim <= 0) { snprintf(out, sz, "climit must be >0"); return ERR_INVALID; }
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].cpu_limit = lim;
+            K.procs.procs[i].cpu_time = 0; /* reset on set? or not. for now don't reset */
+            snprintf(out, sz, "PID %d cpu_limit %d", pid, lim);
             return ERR_OK;
         }
     }
@@ -3302,7 +3373,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"current", cmd_current}, {"signal", cmd_signal}, {"pause", cmd_pause},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"pause", cmd_pause},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
