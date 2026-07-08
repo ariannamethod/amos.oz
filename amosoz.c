@@ -134,6 +134,7 @@ typedef struct {
     int owned_blocks[MAX_BLOCKS]; /* block ids owned by this proc */
     int owned_block_count;
     int open_fds[32]; /* simple fd table: index into fs nodes or -1 */
+    int priority; /* 0 normal, higher = preferred in scheduler */
 } Process;
 
 typedef struct {
@@ -725,6 +726,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].mem_used_kb = 0;
             pt->procs[i].owned_block_count = 0;
             for (int f=0; f<32; f++) pt->procs[i].open_fds[f] = -1;
+            pt->procs[i].priority = 0;
             return pt->procs[i].pid;
         }
     }
@@ -838,22 +840,32 @@ static int proc_tick(ProcessTable *pt) {
         }
     }
 
+    /* priority-aware: pick highest prio ready (ties by RR) */
+    int best_idx = -1;
+    int best_prio = -999;
     for (int i = 0; i < n; i++) {
         int idx = (pt->sched_next + i) % n;
         Process *p = &pt->procs[idx];
         if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
-            /* demote previous runner */
-            for (int j = 0; j < n; j++) {
-                if (pt->procs[j].used && strcmp(pt->procs[j].state, "running") == 0 && j != idx) {
-                    strcpy(pt->procs[j].state, "ready");
-                }
+            if (p->priority > best_prio || (p->priority == best_prio && best_idx == -1)) {
+                best_prio = p->priority;
+                best_idx = idx;
             }
-            strcpy(p->state, "running");
-            p->ticks++;
-            K.current_pid = p->pid;
-            pt->sched_next = (idx + 1) % n;
-            return pt->tick_count;
         }
+    }
+    if (best_idx >= 0) {
+        /* demote previous */
+        for (int j = 0; j < n; j++) {
+            if (pt->procs[j].used && strcmp(pt->procs[j].state, "running") == 0 && j != best_idx) {
+                strcpy(pt->procs[j].state, "ready");
+            }
+        }
+        Process *p = &pt->procs[best_idx];
+        strcpy(p->state, "running");
+        p->ticks++;
+        K.current_pid = p->pid;
+        pt->sched_next = (best_idx + 1) % n;
+        return pt->tick_count;
     }
     return pt->tick_count;
 }
@@ -1570,6 +1582,21 @@ static int cmd_yield(char *out, int sz, int argc, char **argv) {
     }
     snprintf(out, sz, "nothing to yield");
     return ERR_OK;
+}
+
+static int cmd_nice(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: nice <pid> <prio>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int prio = atoi(argv[2]);
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].priority = prio;
+            snprintf(out, sz, "PID %d priority %d", pid, prio);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
 }
 
 static int cmd_tick(char *out, int sz, int argc, char **argv) {
@@ -3043,7 +3070,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
