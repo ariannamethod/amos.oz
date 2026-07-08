@@ -937,6 +937,27 @@ static int proc_tick(ProcessTable *pt) {
         }
     }
 
+    /* signal delivery for deeper IPC */
+    for (int i = 0; i < n; i++) {
+        if (pt->procs[i].used && pt->procs[i].signals) {
+            if (pt->procs[i].signals & (1 << 9)) { /* SIGKILL */
+                strcpy(pt->procs[i].state, "zombie");
+                pt->procs[i].exit_code = 9;
+                pt->procs[i].signals = 0;
+            } else if (pt->procs[i].signals & (1 << 15)) { /* SIGTERM */
+                strcpy(pt->procs[i].state, "zombie");
+                pt->procs[i].exit_code = 15;
+                pt->procs[i].signals = 0;
+            } else {
+                /* other signals just unblock */
+                if (strcmp(pt->procs[i].state, "blocked") == 0) {
+                    strcpy(pt->procs[i].state, "ready");
+                }
+                pt->procs[i].signals = 0; /* consume */
+            }
+        }
+    }
+
     /* priority-aware + time slice preemption: full scan + reset */
     int max_prio = -999;
     for (int i = 0; i < n; i++) {
@@ -2017,6 +2038,8 @@ static int cmd_write(char *out, int sz, int argc, char **argv) {
     int err = kernel_syscall("write", out, sz, wargc, wargv);
     if (err == ERR_OK)
         ledger_meta_set(1, "fs write", resolved, old_content, 0, was_create);
+    else if (strcmp(resolved, "/dev/full") == 0)
+        snprintf(out, sz, "write: %s: no space left on device", argv[1]);
     out[0] = '\0';
     return err;
 }
