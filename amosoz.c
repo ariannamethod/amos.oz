@@ -1467,11 +1467,20 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
     int status = 0;
     int child = proc_wait(&K.procs, 2, &status); /* approx parent = shell pid 2 */
-    if (child < 0) {
-        snprintf(out, sz, "no zombie children");
+    if (child >= 0) {
+        snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
     }
-    snprintf(out, sz, "reaped PID %d status %d", child, status);
+    /* blocking wait: tick until child or limit */
+    for (int t=0; t<100; t++) {
+        proc_tick(&K.procs);
+        child = proc_wait(&K.procs, 2, &status);
+        if (child >= 0) {
+            snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no zombie children (blocked timeout)");
     return ERR_OK;
 }
 
