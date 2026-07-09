@@ -17,6 +17,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 
+#define UNUSED(x) ((void)(x))
+
 #define VERSION "0.4.0"
 #define SYSTEM_NAME "amosOZ"
 #define BUILD_DATE "2026-06-30"
@@ -173,7 +175,8 @@ typedef struct {
 
 typedef struct {
     LedgerEntry entries[MAX_LEDGER];
-    int count;
+    int head;   /* oldest entry index for ring buffer */
+    int count;  /* current number of valid entries (0..MAX) */
 } OZLedger;
 
 /* ─── Module System ───────────────────────────────────────────────────────── */
@@ -653,22 +656,9 @@ static void proc_refresh_all(void) {
             int pid = K.procs.procs[i].pid;
             char ppath[MAX_PATH];
             snprintf(ppath, sizeof(ppath), "/proc/%d/status", pid);
-            snprintf(buf, sizeof(buf),
-                "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
-                "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
-                "Mem:\t%d/%d kB\nSignals:\t%d\nSigmask:\t%d\nFds:\t%d\n",
-                K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
-                K.procs.procs[i].state,
-                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
-                K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
-                K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
-                K.procs.procs[i].signals,
-                /* count open fds */
-                0 /* will be overwritten */ );
-            /* count fds */
+            /* count fds first */
             int fcount = 0;
             for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fcount++;
-            /* rebuild with fcount */
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
                 "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
@@ -896,10 +886,6 @@ static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
     return ERR_NO_PROCESS;
 }
 
-static int proc_exit(ProcessTable *pt, int pid, int exit_code) {
-    return proc_kill(pt, pid, exit_code);
-}
-
 /* minimal wait: reap first zombie child of parent, return its pid and status */
 static int proc_wait(ProcessTable *pt, int parent_pid, int *status_out) {
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -1093,14 +1079,21 @@ static int proc_tick(ProcessTable *pt) {
 }
 
 /* ─── OZ Ledger ───────────────────────────────────────────────────────────── */
-static void ledger_init(OZLedger *l) { memset(l, 0, sizeof(OZLedger)); }
+static void ledger_init(OZLedger *l) { memset(l, 0, sizeof(OZLedger)); l->head = 0; l->count = 0; }
 
 static void ledger_record_ex(OZLedger *l, const char *cmd, const char *pcmd, const char *pargs,
                              const char *actor, int tick, int result, const char *explanation,
                              int reversible, const char *undo_path, const char *undo_content,
                              int undo_is_dir, int undo_was_create) {
-    if (l->count >= MAX_LEDGER) return;
-    LedgerEntry *e = &l->entries[l->count++];
+    int idx;
+    if (l->count < MAX_LEDGER) {
+        idx = (l->head + l->count) % MAX_LEDGER;
+        l->count++;
+    } else {
+        idx = l->head;
+        l->head = (l->head + 1) % MAX_LEDGER;
+    }
+    LedgerEntry *e = &l->entries[idx];
     strncpy(e->command, cmd, MAX_CMD_LEN-1);
     strncpy(e->parsed_cmd, pcmd ? pcmd : "", 31);
     strncpy(e->parsed_args, pargs ? pargs : "", 255);
@@ -1114,10 +1107,6 @@ static void ledger_record_ex(OZLedger *l, const char *cmd, const char *pcmd, con
     if (undo_content) strncpy(e->undo_content, undo_content, MAX_CONTENT-1);
     e->undo_is_dir = undo_is_dir;
     e->undo_was_create = undo_was_create;
-}
-
-static void ledger_record(OZLedger *l, const char *cmd, const char *actor, int tick, int result) {
-    ledger_record_ex(l, cmd, "", "", actor, tick, result, "Executed", 0, NULL, NULL, 0, 0);
 }
 
 /* ─── Module System ───────────────────────────────────────────────────────── */
@@ -1972,9 +1961,17 @@ static int cmd_send(char *out, int sz, int argc, char **argv) {
     }
     for (int i=0; i<MAX_PROCS; i++) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            /* append to mailbox, simple */
-            strncat(K.procs.procs[i].mailbox, msg, sizeof(K.procs.procs[i].mailbox) - strlen(K.procs.procs[i].mailbox) - 2);
-            strncat(K.procs.procs[i].mailbox, "\n", sizeof(K.procs.procs[i].mailbox) - strlen(K.procs.procs[i].mailbox) - 1);
+            /* append to mailbox safely */
+            size_t mlen = strlen(K.procs.procs[i].mailbox);
+            size_t avail = sizeof(K.procs.procs[i].mailbox) - mlen - 1;
+            if (avail > 1) {
+                strncat(K.procs.procs[i].mailbox, msg, avail - 1);
+                mlen = strlen(K.procs.procs[i].mailbox);
+                if (mlen < sizeof(K.procs.procs[i].mailbox) - 1) {
+                    K.procs.procs[i].mailbox[mlen] = '\n';
+                    K.procs.procs[i].mailbox[mlen+1] = '\0';
+                }
+            }
             /* unblock if waiting */
             if (strcmp(K.procs.procs[i].state, "blocked") == 0 && K.procs.procs[i].sleep_ticks == -1) {
                 strcpy(K.procs.procs[i].state, "ready");
@@ -2490,10 +2487,12 @@ static int cmd_trace(char *out, int sz, int argc, char **argv) {
     if (K.ledger.count == 0) { snprintf(out, sz, "(no trace entries)"); return ERR_OK; }
     n = safe_append(out, n, sz, "OZ Ledger Trace:\n");
     int start = K.ledger.count > count ? K.ledger.count - count : 0;
-    for (int i = start; i < K.ledger.count; i++)
+    for (int i = start; i < K.ledger.count; i++) {
+        int idx = (K.ledger.head + i) % MAX_LEDGER;
+        LedgerEntry *e = &K.ledger.entries[idx];
         n = safe_append(out, n, sz, "  [%d] %s -> %d (%s)\n",
-            K.ledger.entries[i].tick, K.ledger.entries[i].command,
-            K.ledger.entries[i].result_code, K.ledger.entries[i].explanation);
+            e->tick, e->command, e->result_code, e->explanation);
+    }
     return ERR_OK;
 }
 
@@ -2502,7 +2501,8 @@ static int cmd_replay(char *out, int sz, int argc, char **argv) {
     if (K.ledger.count == 0) { snprintf(out, sz, "(no replay data)"); return ERR_OK; }
     n = safe_append(out, n, sz, "Replay Log:\n");
     for (int i = 0; i < K.ledger.count; i++) {
-        LedgerEntry *e = &K.ledger.entries[i];
+        int idx = (K.ledger.head + i) % MAX_LEDGER;
+        LedgerEntry *e = &K.ledger.entries[idx];
         n = safe_append(out, n, sz, "  tick=%d cmd=%s parsed=%s args=%s result=%d rev=%d\n",
             e->tick, e->command, e->parsed_cmd, e->parsed_args, e->result_code, e->reversible);
     }
@@ -2511,11 +2511,12 @@ static int cmd_replay(char *out, int sz, int argc, char **argv) {
 
 static int cmd_undo(char *out, int sz, int argc, char **argv) {
     for (int i = K.ledger.count - 1; i >= 0; i--) {
-        LedgerEntry *e = &K.ledger.entries[i];
+        int idx = (K.ledger.head + i) % MAX_LEDGER;
+        LedgerEntry *e = &K.ledger.entries[idx];
         if (!e->reversible || e->result_code != ERR_OK) continue;
         if (e->undo_was_create) {
-            int idx = fs_find(&K.fs, e->undo_path);
-            if (idx >= 0) K.fs.nodes[idx].used = 0;
+            int fidx = fs_find(&K.fs, e->undo_path);
+            if (fidx >= 0) K.fs.nodes[fidx].used = 0;
         } else if (e->undo_is_dir) {
             fs_add_dir(&K.fs, e->undo_path);
         } else {
@@ -3561,6 +3562,7 @@ static int dispatch(const char *line, char *output, int outsize) {
 
 /* ─── Main ────────────────────────────────────────────────────────────────── */
 int main(int argc, char **argv) {
+    UNUSED(argc); UNUSED(argv);
     kernel_init();
     printf("%s", MOTD);
 
