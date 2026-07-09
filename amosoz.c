@@ -255,6 +255,7 @@ typedef struct {
     int job_count;
     char fortune_oz_idx;
     int current_pid; /* the one the scheduler picked as running - for syscall context */
+    int shell_pid;   /* the main interactive shell pid for parent/ppid consistency in foundation */
     int suppress_next_auto_tick; /* fg etc stick for next cmd */
 } Kernel;
 
@@ -391,17 +392,9 @@ static int mem_alloc(VirtualMemory *m, int size, int owner_pid, const char *flag
             break;
         }
     }
-    /* for tests or early boot allow without owner proc, but prefer real */
     if (!owner) {
-        /* fallback: global alloc without per-proc charge for compatibility */
-        int idx = m->block_count++;
-        m->blocks[idx].id = m->next_id++;
-        m->blocks[idx].size = size;
-        snprintf(m->blocks[idx].owner, sizeof(m->blocks[idx].owner), "%d", owner_pid);
-        strncpy(m->blocks[idx].flags, flags, 7);
-        m->blocks[idx].used = 1;
-        m->used_kb += size;
-        return m->blocks[idx].id;
+        /* strict foundation: caller must have valid current/owner context (boot spawns init+shell first) */
+        return -1;
     }
 
     if (owner->owned_block_count >= MAX_BLOCKS) return -1;
@@ -1021,29 +1014,59 @@ static int proc_tick(ProcessTable *pt) {
                 p->slice_used = 0;
                 strcpy(p->state, "ready");
             }
-            if (p->priority > max_prio) max_prio = p->priority;
+            /* only consider those under cpu limit */
+            if (p->cpu_time < p->cpu_limit && p->priority > max_prio) max_prio = p->priority;
         }
     }
     int best_idx = -1;
     for (int i = 0; i < n; i++) {
         int idx = (pt->sched_next + i) % n;
         Process *p = &pt->procs[idx];
-        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio) {
+        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio && p->cpu_time < p->cpu_limit) {
             best_idx = idx;
             break;
         }
     }
     if (best_idx < 0) {
-        /* full scan fallback */
+        /* full scan fallback for any ready under limit */
         for (int i = 0; i < n; i++) {
             Process *p = &pt->procs[i];
-            if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio) {
+            if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->cpu_time < p->cpu_limit) {
+                best_idx = i;
+                break;
+            }
+        }
+    }
+    if (best_idx < 0) {
+        /* last resort: any non-stopped under limit */
+        for (int i = 0; i < n; i++) {
+            Process *p = &pt->procs[i];
+            if (p->used && strcmp(p->state, "stopped") != 0 && strcmp(p->state, "zombie") != 0 && p->cpu_time < p->cpu_limit) {
+                best_idx = i;
+                strcpy(p->state, "ready");
+                break;
+            }
+        }
+    }
+    if (best_idx < 0) {
+        /* absolute last: pick first ready and force */
+        for (int i = 0; i < n; i++) {
+            Process *p = &pt->procs[i];
+            if (p->used && strcmp(p->state, "ready") == 0) {
                 best_idx = i;
                 break;
             }
         }
     }
     if (best_idx >= 0) {
+        /* init reaps zombies automatically (minimal OS) */
+        if (pt->procs[best_idx].pid == 1) {
+            for (int z = 0; z < n; z++) {
+                if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0) {
+                    pt->procs[z].used = 0;
+                }
+            }
+        }
         /* demote previous */
         for (int j = 0; j < n; j++) {
             if (pt->procs[j].used && strcmp(pt->procs[j].state, "running") == 0 && j != best_idx) {
@@ -1057,23 +1080,65 @@ static int proc_tick(ProcessTable *pt) {
             p->cpu_violations++;
             strcpy(p->state, "stopped");
             pt->sched_next = (best_idx + 1) % n;
+        } else {
+            strcpy(p->state, "running");
+            p->ticks++;
+            p->cpu_time++;
+            p->slice_used++;
+            K.current_pid = p->pid;
+
+            /* if just exhausted, reset for next */
+            if (p->slice_used >= p->max_slice) {
+                p->slice_used = 0;
+                strcpy(p->state, "ready");
+            }
+
+            pt->sched_next = (best_idx + 1) % n;
             return pt->tick_count;
         }
-
-        strcpy(p->state, "running");
-        p->ticks++;
-        p->cpu_time++;
-        p->slice_used++;
-        K.current_pid = p->pid;
-
-        /* if just exhausted, reset for next */
-        if (p->slice_used >= p->max_slice) {
-            p->slice_used = 0;
-            strcpy(p->state, "ready");
+    }
+    /* foundation guarantee: never 'none' or running=none. always pick or force a ready proc, set current_pid, init reaps zombies */
+    int has_running = 0;
+    for (int i = 0; i < n; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "running") == 0) has_running = 1;
+    if (!has_running) {
+        int chosen = -1;
+        for (int i = 0; i < n && chosen < 0; i++) {
+            Process *p = &pt->procs[i];
+            if (p->used && strcmp(p->state, "ready") == 0 && p->cpu_time < p->cpu_limit) chosen = i;
         }
-
-        pt->sched_next = (best_idx + 1) % n;
-        return pt->tick_count;
+        if (chosen < 0) {
+            for (int i = 0; i < n && chosen < 0; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "ready") == 0) chosen = i;
+        }
+        if (chosen < 0) {
+            for (int i = 0; i < n && chosen < 0; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "zombie") != 0 && strcmp(pt->procs[i].state, "stopped") != 0) {
+                chosen = i;
+                strcpy(pt->procs[i].state, "ready");
+            }
+        }
+        if (chosen >= 0) {
+            Process *p = &pt->procs[chosen];
+            strcpy(p->state, "running");
+            p->ticks++;
+            p->cpu_time++;
+            K.current_pid = p->pid;
+            if (p->pid == 1) {
+                for (int z = 0; z < n; z++) if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0) pt->procs[z].used = 0;
+            }
+        }
+    }
+    if (K.current_pid <= 0) {
+        /* ultimate guarantee for foundation: force shell or init or first to keep OS alive (no none) */
+        int force = (K.shell_pid > 0 ? K.shell_pid : 1);
+        for (int i=0; i<n; i++) if (pt->procs[i].used && pt->procs[i].pid == force) {
+            strcpy(pt->procs[i].state, "running");
+            K.current_pid = force;
+            break;
+        }
+        if (K.current_pid <= 0) for (int i=0; i<n; i++) if (pt->procs[i].used) {
+            strcpy(pt->procs[i].state, "running");
+            K.current_pid = pt->procs[i].pid;
+            break;
+        }
     }
     return pt->tick_count;
 }
@@ -1261,10 +1326,11 @@ static void init_builtin_modules(void) {
 
 /* ─── Devices ─────────────────────────────────────────────────────────────── */
 static void init_devices(void) {
-    const char *names[] = {"console","mem","null","zero"};
-    const char *types[] = {"char","block","char","char"};
-    K.device_count = 4;
-    for (int i = 0; i < 4; i++) {
+    /* keep in sync with fs /dev/ entries for complete devices foundation */
+    const char *names[] = {"console","mem","null","zero","full","random","urandom","tty"};
+    const char *types[] = {"char","block","char","char","char","char","char","char"};
+    K.device_count = 8;
+    for (int i = 0; i < 8; i++) {
         strcpy(K.devices[i].name, names[i]);
         strcpy(K.devices[i].type, types[i]);
         strcpy(K.devices[i].status, "active");
@@ -1334,7 +1400,8 @@ static void kernel_init(void) {
     K.hook_sched_fired = 0;
     K.job_count = 1;
     K.fortune_oz_idx = 0;
-    K.current_pid = sh > 0 ? sh : 0; /* initial current the shell */
+    K.shell_pid = sh > 0 ? sh : 2;
+    K.current_pid = sh > 0 ? sh : 1;
     K.suppress_next_auto_tick = 0;
     snprintf(K.boot_log, sizeof(K.boot_log),
         "[boot] amosOZ %s started\n[boot] %d hook subscribers on boot\n"
@@ -1353,12 +1420,8 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         if (argc < 1) return ERR_INVALID;
         char resolved[MAX_PATH];
         fs_resolve(&K.fs, argv[0], resolved);
-        if (proc_is_virtual(resolved)) proc_refresh_all();
-        int idx = fs_find(&K.fs, resolved);
-        if (idx < 0 || K.fs.nodes[idx].is_dir) return ERR_NOT_FOUND;
-        if (fs_access(&K.fs.nodes[idx], K.user, 'r') != ERR_OK) return ERR_PERMISSION;
-        snprintf(out, outsz, "%s", K.fs.nodes[idx].content);
-        return ERR_OK;
+        /* unified: devices (/dev/zero etc), /proc refresh, access, normal files all via one path */
+        return fs_read_to_buf(resolved, out, outsz);
     }
     if (strcmp(op, "write") == 0) {
         if (argc < 2) return ERR_INVALID;
@@ -1411,16 +1474,13 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         int idx = fs_find(&K.fs, resolved);
         if (idx < 0 || !K.fs.nodes[idx].is_dir) return ERR_NOT_FOUND;
         if (fs_access(&K.fs.nodes[idx], K.user, 'x') != ERR_OK) return ERR_PERMISSION;
-        /* set per current proc */
-        int set = 0;
+        /* set per current proc + global for legacy/internal resolve (current is source of truth) */
         for (int i=0; i<MAX_PROCS; i++) {
             if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
                 strcpy(K.procs.procs[i].cwd, resolved);
-                set = 1;
-                break;
             }
         }
-        if (!set) strcpy(K.fs.cwd, resolved);
+        strcpy(K.fs.cwd, resolved);
         return ERR_OK;
     }
     if (strcmp(op, "alloc") == 0) {
@@ -1438,7 +1498,8 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     }
     if (strcmp(op, "spawn") == 0) {
         if (argc < 1) return ERR_INVALID;
-        int pid = proc_spawn(&K.procs, argv[0], 1); /* approx parent shell */
+        int parent = K.shell_pid > 0 ? K.shell_pid : 1;
+        int pid = proc_spawn(&K.procs, argv[0], parent);
         if (pid < 0) return ERR_NO_MEMORY;
         snprintf(out, outsz, "%d", pid);
         return ERR_OK;
@@ -1648,7 +1709,7 @@ static int cmd_ps(char *out, int sz, int argc, char **argv) {
 
 static int cmd_run(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: run <name>"); return ERR_INVALID; }
-    int parent = 2; /* always user shell as parent for run */
+    int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
     int pid = proc_spawn(&K.procs, argv[1], parent);
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Started process '%s' with PID %d", argv[1], pid);
@@ -1657,7 +1718,7 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
 
 static int cmd_fork(char *out, int sz, int argc, char **argv) {
     /* fork: clone state for minimal OS foundation (fds, cwd, limits, signals mask, prio, slice) */
-    int parent = 2; /* user shell parents user forks */
+    int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
     Process *p = NULL;
     for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) { p = &K.procs.procs[i]; break; }
     if (!p) p = &K.procs.procs[1];
@@ -1732,20 +1793,16 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
-    int parents[2] = {K.current_pid, 2};
+    int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
     int status = 0;
-    int child = -1;
-    for (int p=0; p<2 && child<0; p++) {
-        if (parents[p] > 0) child = proc_wait(&K.procs, parents[p], &status);
-    }
+    int child = proc_wait(&K.procs, parent, &status);
     if (child >= 0) {
         snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
     }
-    /* blocking wait: set caller (shell) blocked and tick until child or limit */
-    int waiter = 2;
+    /* blocking wait: set caller blocked and tick until child or limit */
     for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == waiter) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) {
             strcpy(K.procs.procs[i].state, "blocked");
             K.procs.procs[i].sleep_ticks = 100;
             break;
@@ -1753,10 +1810,7 @@ static int cmd_wait(char *out, int sz, int argc, char **argv) {
     }
     for (int t=0; t<100; t++) {
         proc_tick(&K.procs);
-        child = -1;
-        for (int p=0; p<2 && child<0; p++) {
-            if (parents[p] > 0) child = proc_wait(&K.procs, parents[p], &status);
-        }
+        child = proc_wait(&K.procs, parent, &status);
         if (child >= 0) {
             snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
             return ERR_OK;
@@ -1985,13 +2039,15 @@ static int cmd_send(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_current(char *out, int sz, int argc, char **argv) {
-    snprintf(out, sz, "current pid: %d", K.current_pid);
+    int n = 0;
+    n = safe_append(out, n, sz, "current pid: %d", K.current_pid);
     for (int i=0; i<MAX_PROCS; i++) {
         if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-            snprintf(out, sz, "current pid: %d (%s) state=%s", K.current_pid, K.procs.procs[i].name, K.procs.procs[i].state);
+            n = safe_append(out, n, sz, " (%s) state=%s", K.procs.procs[i].name, K.procs.procs[i].state);
             break;
         }
     }
+    n = safe_append(out, n, sz, " shell:%d", K.shell_pid);
     return ERR_OK;
 }
 
@@ -2001,7 +2057,7 @@ static int cmd_tick(char *out, int sz, int argc, char **argv) {
     proc_refresh_all();
 
     /* find who is currently running thanks to the scheduler */
-    const char *running = "none";
+    const char *running = "idle";
     for (int i = 0; i < MAX_PROCS; i++) {
         if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
             running = K.procs.procs[i].name;
@@ -2027,6 +2083,13 @@ static int cmd_status(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_pwd(char *out, int sz, int argc, char **argv) {
+    /* per current proc cwd (foundation) */
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
+            snprintf(out, sz, "%s", K.procs.procs[i].cwd);
+            return ERR_OK;
+        }
+    }
     snprintf(out, sz, "%s", K.fs.cwd);
     return ERR_OK;
 }
@@ -3499,7 +3562,8 @@ static int cmd_exec(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: exec <path> [args...]"); return ERR_INVALID; }
     /* first try as image replace (for 'exec newname') */
     if (strchr(argv[1], '/') == NULL) {
-        int err = proc_exec(K.current_pid ? K.current_pid : 2, argv[1]);
+        int exec_pid = K.current_pid > 0 ? K.current_pid : K.shell_pid;
+        int err = proc_exec(exec_pid, argv[1]);
         if (err == 0) {
             snprintf(out, sz, "exec image to %s", argv[1]);
             return ERR_OK;
@@ -3570,7 +3634,15 @@ int main(int argc, char **argv) {
     char output[8192];
 
     while (K.running) {
-        printf("%s@amosoz:%s$ ", K.user, K.fs.cwd);
+        /* per-current context cwd for prompt (foundation current_pid ownership) */
+        const char *cwd = K.fs.cwd;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
+                cwd = K.procs.procs[i].cwd;
+                break;
+            }
+        }
+        printf("%s@amosoz:%s$ ", K.user, cwd);
         fflush(stdout);
         if (!fgets(line, sizeof(line), stdin)) break;
         /* Strip newline */
