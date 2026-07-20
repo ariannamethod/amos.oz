@@ -473,7 +473,7 @@ static void fs_resolve(VirtualFS *fs, const char *path, char *out) {
         }
     }
     if (path[0] == '/') {
-        strcpy(out, path);
+        snprintf(out, MAX_PATH, "%s", path);
     } else {
         if (strcmp(base, "/") == 0)
             snprintf(out, MAX_PATH, "/%s", path);
@@ -489,7 +489,7 @@ static void fs_resolve(VirtualFS *fs, const char *path, char *out) {
     while (tok) {
         if (strcmp(tok, ".") == 0) { /* skip */ }
         else if (strcmp(tok, "..") == 0) { if (pcount > 0) pcount--; }
-        else { strncpy(parts[pcount], tok, 63); pcount++; }
+        else if (pcount < 32) { strncpy(parts[pcount], tok, 63); parts[pcount][63] = '\0'; pcount++; }
         tok = strtok(NULL, "/");
     }
     if (pcount == 0) { strcpy(out, "/"); return; }
@@ -2391,8 +2391,8 @@ static int cmd_set(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: set <key> <value>"); return ERR_INVALID; }
     char val[128] = "";
     for (int i = 2; i < argc; i++) {
-        if (i > 2) strcat(val, " ");
-        strncat(val, argv[i], 127 - strlen(val));
+        if (i > 2) strncat(val, " ", sizeof(val) - strlen(val) - 1);
+        strncat(val, argv[i], sizeof(val) - strlen(val) - 1);
     }
     env_set(argv[1], val);
     out[0] = '\0';
@@ -2636,10 +2636,19 @@ static int cmd_load(char *out, int sz, int argc, char **argv) {
     const char *fname = (argc > 1) ? argv[1] : "amosoz.img";
     FILE *f = fopen(fname, "rb");
     if (!f) { snprintf(out, sz, "load: %s not found", fname); return ERR_IO; }
-    fread(&K.fs, sizeof(VirtualFS), 1, f);
-    fread(&K.env, sizeof(K.env), 1, f);
-    fread(&K.env_count, sizeof(int), 1, f);
+    size_t r1 = fread(&K.fs, sizeof(VirtualFS), 1, f);
+    size_t r2 = fread(&K.env, sizeof(K.env), 1, f);
+    size_t r3 = fread(&K.env_count, sizeof(int), 1, f);
     fclose(f);
+    if (r1 != 1 || r2 != 1 || r3 != 1) {
+        kernel_init(); /* corrupt/truncated image: reset to a sane state, don't run on garbage */
+        snprintf(out, sz, "load: %s is truncated or corrupt (system reset)", fname);
+        return ERR_IO;
+    }
+    /* untrusted image: clamp counts and terminate cwd so no iteration/print runs past K */
+    if (K.fs.node_count < 0 || K.fs.node_count > MAX_FILES) K.fs.node_count = MAX_FILES;
+    if (K.env_count < 0 || K.env_count > MAX_ENV) K.env_count = MAX_ENV;
+    K.fs.cwd[MAX_PATH - 1] = '\0';
     snprintf(out, sz, "System image loaded from %s", fname);
     return ERR_OK;
 }
@@ -3312,6 +3321,7 @@ static void shell_parse_redirect(char *seg, char *redir_path, int *append, char 
         *in = '\0';
         str_trim_inplace(seg);
         strncpy(redir_in, in + 1, MAX_PATH - 1);
+        redir_in[MAX_PATH - 1] = '\0';
         str_trim_inplace(redir_in);
     }
     char *p = strstr(seg, ">>");
@@ -3320,6 +3330,7 @@ static void shell_parse_redirect(char *seg, char *redir_path, int *append, char 
         *append = 1;
         str_trim_inplace(seg);
         strncpy(redir_path, p + 2, MAX_PATH - 1);
+        redir_path[MAX_PATH - 1] = '\0';
         str_trim_inplace(redir_path);
         return;
     }
@@ -3328,6 +3339,7 @@ static void shell_parse_redirect(char *seg, char *redir_path, int *append, char 
         *p = '\0';
         str_trim_inplace(seg);
         strncpy(redir_path, p + 1, MAX_PATH - 1);
+        redir_path[MAX_PATH - 1] = '\0';
         str_trim_inplace(redir_path);
     }
 }

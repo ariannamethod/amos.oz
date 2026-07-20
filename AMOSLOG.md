@@ -5,6 +5,46 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-20 — Harden 4 memory-corruption bugs + 1 latent (ASan-driven)
+
+An AddressSanitizer-driven audit of `amosoz.c` found four reachable memory-corruption bugs
+(each reproduced under `-fsanitize=address`) plus one latent non-termination. All fixed; the
+exact crashing inputs now run clean.
+
+### CRITICAL — `fs_resolve` (the path resolver behind every path command)
+- **l.476:** absolute paths were `strcpy(out, path)` into the caller's `char[MAX_PATH]` — a
+  path > 511 chars overflowed the stack (ASan: WRITE size 702). Now
+  `snprintf(out, MAX_PATH, "%s", path)`, matching the existing relative-path branch.
+- **l.492:** `parts[pcount]` was written into a fixed `char[32][64]` with no `pcount < 32`
+  guard — a path with >32 components overflowed it (ASan: WRITE size 63). Now guarded and
+  each part null-terminated.
+
+### HIGH — `cmd_load` untrusted deserialization (l.2635)
+`load` read a raw `VirtualFS` from an untrusted `.img` with no validation; a forged
+`node_count` made fs iteration walk past the global `K` (ASan: global-buffer-overflow READ in
+`cmd_ls`). Now: `fread` returns are checked (truncated/corrupt → `kernel_init` reset),
+`node_count`/`env_count` clamped to their array bounds, `cwd` force-terminated.
+
+### HIGH — `cmd_set` size_t underflow (l.2390)
+`strncat(val, argv[i], 127 - strlen(val))` computed the bound as `size_t`; a 127-char word
+plus the following unbounded `strcat(val, " ")` pushed `strlen` to 128, underflowing to
+`SIZE_MAX` → stack overflow (ASan: WRITE at l.2394). Both appends now use the bounded
+`sizeof(val) - strlen(val) - 1` (the safe pattern used elsewhere in the file).
+
+### LATENT — `shell_parse_redirect` (l.3306)
+`strncpy(redir_path/redir_in, …, MAX_PATH-1)` could leave the buffer unterminated; the
+following `str_trim_inplace` `strlen` would then read OOB (dormant in the current build, but a
+real defect). Each `strncpy` now explicitly null-terminates.
+
+### Verification
+- `make` (`-Wall -Wextra`): clean, no new warnings on the changed lines.
+- C selftest **50/50 — ALL TESTS PASSED**; shell treaty **ALL PASSED** (redirects intact).
+- ASan re-run of all four repros (700-char absolute path; >32-component path; forged `.img`;
+  `set K <127-char> <…>`): every one now exits 0 with **zero AddressSanitizer errors**.
+- Pending: an independent Codex audit pass.
+
+---
+
 ## 2026-07-20 — Move reference implementations to `reffs/`
 
 `amosoz.py` and `amosoz.html` are reference forms; `amosoz.c` is canonical. Both moved into
