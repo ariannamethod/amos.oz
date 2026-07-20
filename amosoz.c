@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <signal.h>
+#include "aml/ariannamethod.h"  /* vendored AML field engine (am_init/am_exec/am_get_state) */
 
 #define UNUSED(x) ((void)(x))
 
@@ -1495,6 +1496,9 @@ static void kernel_init(void) {
     init_builtin_modules();
     init_devices();
     slot_manifest_load("runtime/slots.tsv");
+    am_init();  /* boot the AML resonance field (the continuous substrate) */
+    am_exec("SCHUMANN 7.83\nPROPHECY 3\nDESTINY 0.3\nLAW DEBT_DECAY 0.998\n"); /* field defaults */
+    if (access("amos.soma", R_OK) == 0) am_field_load("amos.soma"); /* restore persisted field over defaults */
     K.boot_time = time(NULL);
     strcpy(K.user, "user");
     K.running = 1;
@@ -3756,6 +3760,21 @@ static int cmd_exec(char *out, int sz, int argc, char **argv) {
     return run_script_node(idx, argc, argv, out, sz);
 }
 
+/* Resonance field readout — the continuous AML substrate (the vector that will drive
+ * scheduling in brick #3 commit 2; for now it is hosted, evolving, and persisted). */
+static int cmd_field(char *out, int sz, int argc, char **argv) {
+    UNUSED(argc); UNUSED(argv);
+    AM_State *s = am_get_state();
+    int n = 0;
+    n = safe_append(out, n, sz, "amosOZ resonance field (AML):\n");
+    n = safe_append(out, n, sz, "  schumann %.3f Hz  coherence %.3f  phase %.3f\n", s->schumann_hz, s->schumann_coherence, s->schumann_phase);
+    n = safe_append(out, n, sz, "  resonance %.3f  entropy %.3f  emergence %.3f\n", s->resonance, s->entropy, s->emergence);
+    n = safe_append(out, n, sz, "  pain %.3f  tension %.3f  dissonance %.3f  debt %.3f\n", s->pain, s->tension, s->dissonance, s->debt);
+    n = safe_append(out, n, sz, "  destiny %.3f  prophecy %d  wormhole %.3f (active %d)\n", s->destiny, s->prophecy, s->wormhole, s->wormhole_active);
+    n = safe_append(out, n, sz, "  velocity %d  magnitude %.3f  scars %d\n", s->velocity_mode, s->velocity_magnitude, s->n_scars);
+    return ERR_OK;
+}
+
 /* ─── Command Dispatcher ──────────────────────────────────────────────────── */
 static const CmdEntry CMD_TABLE[] = {
     {"help", cmd_help}, {"clear", cmd_clear}, {"uname", cmd_uname},
@@ -3785,7 +3804,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"ln", cmd_ln}, {"find", cmd_find},
     {"jobs", cmd_jobs}, {"fg", cmd_fg}, {"nohup", cmd_nohup},
     {"spec", cmd_spec}, {"doctor", cmd_doctor},
-    {"reset", cmd_reset},
+    {"reset", cmd_reset}, {"field", cmd_field},
     {"save", cmd_save}, {"load", cmd_load}, {"fortune", cmd_fortune},
     {NULL, NULL}
 };
@@ -3825,6 +3844,7 @@ int main(int argc, char **argv) {
 
         dispatch(line, output, sizeof(output));
         proc_reap_real(); /* reap any exited real children -> zombies */
+        am_step(0.1f); /* field heartbeat: advance the AML resonance field one step (phase, debt decay, laws enforced) */
         if (output[0]) printf("%s\n", output);
         /* auto time advance for preemption and blocking simulation */
         if (!K.suppress_next_auto_tick) {
@@ -3832,5 +3852,6 @@ int main(int argc, char **argv) {
         }
         K.suppress_next_auto_tick = 0;
     }
+    am_field_save("amos.soma"); /* persist the resonance field across runs */
     return 0;
 }

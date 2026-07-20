@@ -3,3 +3,5 @@ amosoz_neo
 amosoz.img
 *.o
 .DS_Store
+amos.soma
+*.soma

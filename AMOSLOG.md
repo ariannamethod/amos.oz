@@ -15,6 +15,37 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-21 — Brick #3 (commit 1): the AML resonance field — hosted, evolving, persisted
+
+Brick #3 dissolves the discrete tick into a continuous field. Commit 1 brings the **real** field
+engine into amosOZ (the standalone superset hosts the field its SARTRE cuts carry). No hand-rolled
+affect vector — the actual AML field, vendored — so there is no throwaway intermediate to rebuild.
+
+- **Vendored** the AML core into `aml/ariannamethod.{c,h}` (upstream `842ad91`, freshly pulled).
+  The heart stays one file (`amosoz.c`); the field engine lives in a folder. Makefile builds
+  `amosoz.c aml/ariannamethod.c -lm` — the field physics need only libm (BLAS/CUDA optional).
+- `am_init()` boots the field at kernel init; `am_exec("SCHUMANN 7.83 / PROPHECY 3 / DESTINY 0.3 /
+  LAW DEBT_DECAY 0.998")` sets defaults; `am_field_load("amos.soma")` restores a persisted field
+  over the defaults when present.
+- **The main-loop step is now a field step:** each command advances the field via `am_step(0.1)`
+  — schumann phase advances, prophecy debt decays, the LAWS OF NATURE are enforced. The field
+  genuinely evolves; it is not inert-alongside the tick.
+- `field` command reads `am_get_state()` (schumann / resonance / entropy / emergence / pain /
+  tension / dissonance / debt / destiny / prophecy / wormhole / velocity / scars).
+- `am_field_save("amos.soma")` on exit; `.soma` gitignored (runtime state). The field remembers
+  across runs.
+
+### Verification
+- `make` (`-Wall -Wextra`): rc 0, zero amosoz.c errors, vendored AML compiles clean (0 warnings).
+- C selftest **50/50**; shell treaty **ALL PASSED** (the per-command field step breaks nothing).
+- Field evolves: `field` → 5 commands → `field` shows `schumann_phase` 0.000 → 4.386.
+- Persistence: run 1 (fresh) starts phase 0.000; run 2 restores from `.soma` and starts mid-cycle
+  (phase 3.556). ASan clean on the boot/field/step/persist path.
+
+Next (commit 2): the scheduler reads dominance from the field; round-robin dissolves.
+
+---
+
 ## 2026-07-21 — Brick #2: declarative slot manifest (agnostic targets)
 
 Brick #1 made `run <real-path>` spawn a real process. Brick #2 makes `run` **fully agnostic**

@@ -6,8 +6,8 @@ LDFLAGS ?= -lm
 
 all: amosoz
 
-amosoz: amosoz.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+amosoz: amosoz.c aml/ariannamethod.c aml/ariannamethod.h
+	$(CC) $(CFLAGS) -o $@ amosoz.c aml/ariannamethod.c $(LDFLAGS)
 
 run: amosoz
 	./amosoz
