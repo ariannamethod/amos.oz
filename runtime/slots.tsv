@@ -1,0 +1,2 @@
+slot	label	kind	state	target	notes
+hello	hello-demo	baked	wired	/bin/echo	demo real slot — `run hello <text>` prints via a real /bin/echo

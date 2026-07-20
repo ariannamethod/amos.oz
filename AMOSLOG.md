@@ -15,6 +15,27 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-21 — Brick #2: declarative slot manifest (agnostic targets)
+
+Brick #1 made `run <real-path>` spawn a real process. Brick #2 makes `run` **fully agnostic**
+through a data-declared manifest, borrowing ariannamethod.cli's `runtime/slots.tsv` shape.
+
+- `runtime/slots.tsv` — a TSV registry: `slot │ label │ kind │ state │ target │ notes`. Loaded
+  at boot (`slot_manifest_load`), tolerant of a missing file (standalone use = no slots). Parsing
+  is `snprintf`-bounded throughout.
+- `run <name>` resolution order: a real host executable (path + `X_OK`) → real process (brick #1);
+  else a manifest slot → resolve by `kind` — `baked`/`repo` fork+exec the target as a real
+  process, `script`/`aml` are recognized with their runtimes wired later; else any name → a
+  virtual monad (unchanged).
+- Ships one demo slot: `hello → /bin/echo` (`run hello <text>` prints via a real `/bin/echo`).
+
+### Verification
+- `-Wall -Wextra` clean; C selftest **50/50**; shell treaty **ALL PASSED**.
+- `run hello MANIFEST_OK` → "Started slot 'hello' -> /bin/echo" and the real child prints
+  `MANIFEST_OK`; `run somevirtualname` is still a virtual monad; ASan clean.
+
+---
+
 ## 2026-07-21 — Brick #1: real process slots (start of "make processes real")
 
 `run` was a simulation — `run foo` added a bookkeeping row. First brick of the "make it real"

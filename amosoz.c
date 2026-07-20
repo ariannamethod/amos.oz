@@ -1428,6 +1428,59 @@ static void env_unset(const char *key) {
     }
 }
 
+/* ─── Slot Manifest (declarative orchestration, slots.tsv-style) ───────────── */
+/* A data-declared registry of runnable targets: `run <name>` resolves a slot to a real
+ * process (baked/repo), a script, or a deferred AML target — the agnostic-target idea
+ * borrowed from ariannamethod.cli's runtime/slots.tsv. Missing manifest = no slots. */
+#define MAX_MANIFEST_SLOTS 16
+typedef struct {
+    char name[64];
+    char label[64];
+    char kind[16];      /* baked | repo | script | aml */
+    char state[16];     /* wired | ... */
+    char target[MAX_PATH];
+    char notes[128];
+    int  used;
+} SlotEntry;
+static SlotEntry g_slots[MAX_MANIFEST_SLOTS];
+static int g_slot_count;
+
+static void slot_manifest_load(const char *path) {
+    g_slot_count = 0;
+    memset(g_slots, 0, sizeof(g_slots));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[1024];
+    while (fgets(line, sizeof(line), f) && g_slot_count < MAX_MANIFEST_SLOTS) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (!line[0] || line[0] == '#') continue;
+        char *fields[6] = {0};
+        int nf = 0;
+        char *save = NULL;
+        for (char *tok = strtok_r(line, "\t", &save); tok && nf < 6; tok = strtok_r(NULL, "\t", &save))
+            fields[nf++] = tok;
+        if (nf < 5) continue;                          /* need name..target */
+        if (strcmp(fields[0], "slot") == 0) continue;  /* header row */
+        SlotEntry *s = &g_slots[g_slot_count];
+        snprintf(s->name,   sizeof(s->name),   "%s", fields[0]);
+        snprintf(s->label,  sizeof(s->label),  "%s", fields[1] ? fields[1] : "");
+        snprintf(s->kind,   sizeof(s->kind),   "%s", fields[2] ? fields[2] : "");
+        snprintf(s->state,  sizeof(s->state),  "%s", fields[3] ? fields[3] : "");
+        snprintf(s->target, sizeof(s->target), "%s", fields[4] ? fields[4] : "");
+        snprintf(s->notes,  sizeof(s->notes),  "%s", (nf >= 6 && fields[5]) ? fields[5] : "");
+        s->used = 1;
+        g_slot_count++;
+    }
+    fclose(f);
+}
+
+static SlotEntry *slot_find(const char *name) {
+    for (int i = 0; i < g_slot_count; i++)
+        if (g_slots[i].used && strcmp(g_slots[i].name, name) == 0) return &g_slots[i];
+    return NULL;
+}
+
 /* ─── Kernel Init ─────────────────────────────────────────────────────────── */
 static void kernel_init(void) {
     memset(&K, 0, sizeof(Kernel));
@@ -1441,6 +1494,7 @@ static void kernel_init(void) {
     init_hooks();
     init_builtin_modules();
     init_devices();
+    slot_manifest_load("runtime/slots.tsv");
     K.boot_time = time(NULL);
     strcpy(K.user, "user");
     K.running = 1;
@@ -1785,6 +1839,24 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
         if (pid < 0) { snprintf(out, sz, "run: cannot spawn %s", argv[1]); return ERR_NO_MEMORY; }
         snprintf(out, sz, "Started real process '%s' pid %d (spawned)", argv[1], pid);
         return ERR_OK;
+    }
+    /* declarative slot from the manifest (agnostic target)? */
+    SlotEntry *slot = slot_find(argv[1]);
+    if (slot) {
+        if (strcmp(slot->kind, "baked") == 0 || strcmp(slot->kind, "repo") == 0) {
+            char *xargv[34];
+            int xc = 0;
+            xargv[xc++] = slot->target;
+            for (int i = 2; i < argc && xc < 33; i++) xargv[xc++] = argv[i];
+            xargv[xc] = NULL;
+            int pid = proc_real_spawn(slot->name, xargv, 0, parent);
+            if (pid < 0) { snprintf(out, sz, "run: cannot spawn slot '%s' (%s)", slot->name, slot->target); return ERR_NO_MEMORY; }
+            snprintf(out, sz, "Started slot '%s' -> %s pid %d (spawned)", slot->name, slot->target, pid);
+            return ERR_OK;
+        }
+        /* script / aml kinds recognized; their runtimes are wired later */
+        snprintf(out, sz, "run: slot '%s' kind '%s' recognized — runtime wired later", slot->name, slot->kind);
+        return ERR_INVALID;
     }
     int pid = proc_spawn(&K.procs, argv[1], parent);
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
