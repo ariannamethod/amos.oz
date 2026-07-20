@@ -672,7 +672,7 @@ static void proc_refresh_all(void) {
             for (int f=0; f<32; f++) {
                 int node = K.procs.procs[i].open_fds[f];
                 if (node >= 0) {
-                    pos += snprintf(fdlist + pos, sizeof(fdlist)-pos, "%d -> %s\n", f, K.fs.nodes[node].path);
+                    pos = safe_append(fdlist, pos, sizeof(fdlist), "%d -> %s\n", f, K.fs.nodes[node].path);
                 }
             }
             if (pos == 0) strcpy(fdlist, "(no open fds)\n");
@@ -2927,9 +2927,10 @@ static int cmd_nohup(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: nohup <command>"); return ERR_INVALID; }
     char cmdline[MAX_CMD_LEN];
     int pos = 0;
+    cmdline[0] = '\0';
     for (int i = 1; i < argc; i++) {
-        if (i > 1) cmdline[pos++] = ' ';
-        pos += snprintf(cmdline + pos, sizeof(cmdline) - pos, "%s", argv[i]);
+        if (i > 1) pos = safe_append(cmdline, pos, sizeof(cmdline), " ");
+        pos = safe_append(cmdline, pos, sizeof(cmdline), "%s", argv[i]);
     }
     char segout[4096];
     int err = shell_execute_line(cmdline, segout, sizeof(segout));

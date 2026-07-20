@@ -5,7 +5,7 @@
 amosOZ is a single-file OS environment in three forms: C, HTML/JS, Python. Not **Treaty-compatible** with Unix userland semantics.
 
 **Canonical:** `amosoz.c` **v0.4.x** — reference implementation (llm.c-grade for OS).  
-**Parity:** `amosoz.py` + `amosoz.html` **v0.4.x** — triple parity (selftest ~50/50).
+**Parity:** `reffs/amosoz.py` + `reffs/amosoz.html` **v0.4.x** — triple parity (selftest ~50/50). Reference forms; C is canonical.
 
 Dedicated to **Amos Oz** (עוז). 
 
@@ -91,7 +91,7 @@ Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), sched
 | File | Status |
 |------|--------|
 | `amosoz.c` | **canonical reference** (foundation complete) |
-| `amosoz.py` + `amosoz.html` | parity maintained |
+| `reffs/amosoz.py` + `reffs/amosoz.html` | parity maintained (reference forms) |
 
 The point is the **single C file** as the complete, self-contained algorithm. Py/HTML are for comparison only.
 

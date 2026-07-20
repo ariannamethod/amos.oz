@@ -13,7 +13,7 @@ else
 fi
 
 echo "=== Python selftest ==="
-if printf 'selftest\nexit\n' | python3 amosoz.py | grep -q 'ALL TESTS PASSED'; then
+if printf 'selftest\nexit\n' | python3 reffs/amosoz.py | grep -q 'ALL TESTS PASSED'; then
   echo "Python: OK"
 else
   echo "Python: FAIL"

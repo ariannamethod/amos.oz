@@ -19,7 +19,7 @@ test-shell: amosoz
 	sh tests/shell_treaty.sh
 
 test-py:
-	printf 'selftest\nexit\n' | python3 amosoz.py
+	printf 'selftest\nexit\n' | python3 reffs/amosoz.py
 
 test-html:
 	node tests/html_selftest.mjs
