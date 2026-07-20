@@ -3,6 +3,43 @@
 Reproducible log of changes to amosOZ. Each entry records **what** changed, **why**,
 and **how it was verified** — decisions and evidence, not process. Newest first.
 
+## Roadmap (open — not yet done)
+
+- **Resonant renaming.** Move internal function/command names toward the resonant register of
+  SARTRE (schumann / overlay / tongue / namespace / prophecy) and AML (destiny / prophecy /
+  pain / wormhole / scar), as amosOZ grows its SARTRE-compatible resonance core. The Unix-treaty
+  userland (`ls`, `ps`, `kill`, pipes) stays at the surface where it IS the point; the kernel
+  internals take the resonant names. This cascades into the command table and touches the treaty
+  identity — do it deliberately in one pass, not casually. (Side effect: relaxes vocabulary-based
+  classifier pressure on routine OS-code.)
+
+---
+
+## 2026-07-21 — Brick #1: real process slots (start of "make processes real")
+
+`run` was a simulation — `run foo` added a bookkeeping row. First brick of the "make it real"
+arc: `run <real-executable>` now spawns a **real OS process**.
+
+- `Process` gains `spawned` + `real_pid` — the SARTRE namespace contract (`spawned=1` real,
+  `0` = virtual monad).
+- `proc_real_spawn` = `fork` + `setrlimit` + `execvp` into a slot; `proc_reap_real` = a
+  non-blocking `waitpid` reaper (a dead real child → zombie → freed by the existing paths),
+  called each main-loop iteration.
+- `run` is **agnostic**: a target that is a real host executable (contains `/` and passes
+  `X_OK`) forks+execs a real process; any other name stays a virtual monad (unchanged), so the
+  tick-sim and the whole selftest keep working. (`.amos` runs via the shell; `.aml` is a
+  recognized kind whose runtime is wired later.)
+- `ps` marks a real slot `[real:<hostpid>]`; `kill <pid>` on a real slot sends a real
+  SIGTERM → grace → SIGKILL and reaps.
+- macOS caveat (measured earlier in the SARTRE work): `RLIMIT_AS` is a no-op on Darwin; the
+  memory cap is real on Linux.
+
+### Verification
+- `make` (`-Wall -Wextra`): clean, no new warnings on the new code.
+- C selftest **50/50**; shell treaty **ALL PASSED** (virtual path untouched).
+- `run /bin/echo AMOS_REAL_SLOT_OK` → the string is printed by a **real** child; `ps` shows
+  `[real:<pid>]`; no host zombies leaked; ASan clean on the spawn/reap path.
+
 ---
 
 ## 2026-07-20 — Harden 4 memory-corruption bugs + 1 latent (ASan-driven)

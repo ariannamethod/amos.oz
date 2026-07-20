@@ -16,6 +16,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <signal.h>
 
 #define UNUSED(x) ((void)(x))
 
@@ -146,6 +150,8 @@ typedef struct {
     int cpu_violations; /* count of times limit was hit */
     int sigmask; /* signal mask for deeper signals */
     char mailbox[256]; /* simple IPC mailbox for send/recv */
+    int   spawned;     /* 1 = backed by a real OS process (fork+exec); 0 = virtual monad (SARTRE ns contract) */
+    pid_t real_pid;    /* real OS pid when spawned; 0 otherwise */
 } Process;
 
 typedef struct {
@@ -851,10 +857,64 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].cpu_violations = 0;
             pt->procs[i].sigmask = 0;
             pt->procs[i].mailbox[0] = '\0';
+            pt->procs[i].spawned = 0;
+            pt->procs[i].real_pid = 0;
             return pt->procs[i].pid;
         }
     }
     return -1;
+}
+
+/* Real process slot: fork+setrlimit+execvp a target, register it as a spawned slot.
+ * argv is NULL-terminated; argv[0] is the executable. amosOZ is single-threaded, so
+ * execvp (PATH search) is fork-safe here. Returns the virtual pid, or -1. This is the
+ * SARTRE ns_spawn contract (spawned=1) grown natively — real, not simulated. */
+static int proc_real_spawn(const char *name, char *const argv[], int mem_limit_mb, int parent_pid) {
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        if (mem_limit_mb > 0) {
+            struct rlimit rl;
+            rl.rlim_cur = rl.rlim_max = (rlim_t)mem_limit_mb * 1024 * 1024;
+            setrlimit(RLIMIT_AS, &rl); /* no-op on macOS; enforced on Linux */
+        }
+        execvp(argv[0], argv);
+        _exit(127); /* exec failed */
+    }
+    int pid = proc_spawn(&K.procs, name, parent_pid);
+    if (pid < 0) {
+        /* no free slot: don't leak the child */
+        kill(child, SIGKILL);
+        int st; waitpid(child, &st, 0);
+        return -1;
+    }
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].spawned = 1;
+            K.procs.procs[i].real_pid = child;
+            strcpy(K.procs.procs[i].state, "running");
+            break;
+        }
+    }
+    return pid;
+}
+
+/* Reap exited real children (non-blocking); a dead real slot becomes a zombie so the
+ * existing wait/init-reap paths free it. Called each main-loop iteration. */
+static void proc_reap_real(void) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        Process *p = &K.procs.procs[i];
+        if (p->used && p->spawned && p->real_pid > 0 && strcmp(p->state, "zombie") != 0) {
+            int st;
+            pid_t r = waitpid(p->real_pid, &st, WNOHANG);
+            if (r == p->real_pid) {
+                p->exit_code = WIFEXITED(st) ? WEXITSTATUS(st)
+                             : WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 0;
+                p->real_pid = 0;
+                strcpy(p->state, "zombie");
+            }
+        }
+    }
 }
 
 static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
@@ -1697,11 +1757,13 @@ static int cmd_ps(char *out, int sz, int argc, char **argv) {
         if (K.procs.procs[i].used) {
             int fds = 0;
             for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fds++;
-            n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-7d %-6d %-5d %-4d %-5d %d\n",
+            n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-7d %-6d %-5d %-4d %-5d %d",
                 K.procs.procs[i].pid, K.procs.procs[i].name,
                 K.procs.procs[i].state, K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].priority,
                 K.procs.procs[i].slice_used, fds);
+            if (K.procs.procs[i].spawned) n = safe_append(out, n, sz, " [real:%d]", (int)K.procs.procs[i].real_pid);
+            n = safe_append(out, n, sz, "\n");
         }
     }
     return ERR_OK;
@@ -1710,6 +1772,20 @@ static int cmd_ps(char *out, int sz, int argc, char **argv) {
 static int cmd_run(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: run <name>"); return ERR_INVALID; }
     int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
+    /* Agnostic target: a real host executable (path with '/', X_OK) runs as a REAL
+     * process slot (fork+exec); anything else is a virtual monad, as before — the same
+     * spawned-vs-monad split as SARTRE namespaces. (.amos scripts run via the shell;
+     * .aml targets are recognized but their runtime is wired later.) */
+    if (strchr(argv[1], '/') && access(argv[1], X_OK) == 0) {
+        char *xargv[34];
+        int xc = 0;
+        for (int i = 1; i < argc && xc < 33; i++) xargv[xc++] = argv[i];
+        xargv[xc] = NULL;
+        int pid = proc_real_spawn(argv[1], xargv, 0, parent);
+        if (pid < 0) { snprintf(out, sz, "run: cannot spawn %s", argv[1]); return ERR_NO_MEMORY; }
+        snprintf(out, sz, "Started real process '%s' pid %d (spawned)", argv[1], pid);
+        return ERR_OK;
+    }
     int pid = proc_spawn(&K.procs, argv[1], parent);
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Started process '%s' with PID %d", argv[1], pid);
@@ -1770,6 +1846,19 @@ static int cmd_kill(char *out, int sz, int argc, char **argv) {
         return ERR_INVALID;
     }
     int pid = atoi(argv[1]);
+    /* real process slot: send a real signal, grace, then reap */
+    for (int i = 0; i < MAX_PROCS; i++) {
+        Process *p = &K.procs.procs[i];
+        if (p->used && p->pid == pid && p->spawned && p->real_pid > 0) {
+            kill(p->real_pid, SIGTERM);
+            for (int g = 0; g < 25; g++) { int st; if (waitpid(p->real_pid, &st, WNOHANG) == p->real_pid) { p->real_pid = 0; break; } usleep(20000); }
+            if (p->real_pid > 0) { kill(p->real_pid, SIGKILL); int st; waitpid(p->real_pid, &st, 0); p->real_pid = 0; }
+            strcpy(p->state, "zombie");
+            p->exit_code = 143;
+            snprintf(out, sz, "Killed real process %d (SIGTERM/grace/SIGKILL)", pid);
+            return ERR_OK;
+        }
+    }
     int err = proc_kill(&K.procs, pid, 0);
     if (err != ERR_OK) { snprintf(out, sz, "Error: process %d not found", pid); return err; }
     snprintf(out, sz, "Killed process %d (zombie)", pid);
@@ -3663,6 +3752,7 @@ int main(int argc, char **argv) {
         if (nl) *nl = '\0';
 
         dispatch(line, output, sizeof(output));
+        proc_reap_real(); /* reap any exited real children -> zombies */
         if (output[0]) printf("%s\n", output);
         /* auto time advance for preemption and blocking simulation */
         if (!K.suppress_next_auto_tick) {
