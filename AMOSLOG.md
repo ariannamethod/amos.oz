@@ -42,7 +42,36 @@ affect vector — the actual AML field, vendored — so there is no throwaway in
 - Persistence: run 1 (fresh) starts phase 0.000; run 2 restores from `.soma` and starts mid-cycle
   (phase 3.556). ASan clean on the boot/field/step/persist path.
 
-Next (commit 2): the scheduler reads dominance from the field; round-robin dissolves.
+## 2026-07-21 — Brick #3 (commit 2): the scheduler dissolves into the field
+
+Commit 1 hosted the field. Commit 2 dissolves the round-robin: the scheduler's primary
+selection is now **read from the AML field each step**, not a fixed rule. This is not a choice
+between regimes — A (velocity tempo), B (chamber balance), C (dissonance pressure) are all
+present every step, and their weight is itself read from the field now (`proc_field_select`):
+
+- **Base:** priority dominates (×1000). The field never overrides a priority level — it governs
+  the choice **among equal-priority ready procs**, exactly where the old round-robin was
+  arbitrary. Coefficients are tunable to deepen the dissolution further.
+- **A (velocity):** NOMOVE/BREATHE bias holding the current proc; RUN biases preemption; WALK is
+  neutral — so a **calm default reduces exactly to priority + round-robin**.
+- **B (chamber, weight = emergence):** flow+warmth favor continuity (keep current); tension+pain
+  favor switching away.
+- **C (pressure, weight = dissonance):** surface the cpu-heaviest proc; past the tunnel threshold
+  with an active wormhole, jump the round-robin origin (a tunnel skip).
+- The field advances deterministically (`am_step`, no RNG in the step path — verified), so the
+  coupling law is reproducible. The existing never-none cascade remains the guaranteed floor;
+  the slice/cpu-limit/signal housekeeping is untouched.
+
+### Verification
+- `make` (`-Wall -Wextra`): 0 amosoz.c errors/warnings (91 warnings all pre-existing).
+- **Regression (calm = round-robin):** C selftest **50/50**; shell treaty **ALL PASSED** — the
+  calm-field default reproduces the old scheduling, so the dissolution is backward-compatible.
+- **Coupling proven behaviorally (A):** booting the field with `VELOCITY NOMOVE` vs `WALK` and
+  ticking a 3-proc cohort — NOMOVE holds the current proc (`running = amossh amossh amossh`)
+  while WALK rotates (`running = b init a c`). The scheduler genuinely reads the field. (RUN
+  coincides with WALK in this scenario because WALK already rotates every tick.) B and C use the
+  identical `am_get_state()` read path in the same function; a full A/B/C behavioral matrix is
+  the next verification. ASan clean on the scheduler path.
 
 ---
 

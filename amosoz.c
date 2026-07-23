@@ -1013,6 +1013,58 @@ static int dup_fd(int pid, int oldfd) {
     return alloc_fd(pid, node);
 }
 
+static float clampf01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+
+/* Field-governed primary selection — the dissolution of the round-robin.
+ * The coupling law is READ FROM THE AML FIELD each step, and the field advances
+ * deterministically (am_step), so this is reproducible. It is not a fixed choice
+ * between regimes: A (velocity tempo), B (chamber balance), C (dissonance pressure)
+ * are all present every step, and their weight is itself read from the field now:
+ *   - base: priority dominates (scaled x1000; the field never overrides a priority
+ *     level — it governs the choice AMONG equal-priority ready procs, where the old
+ *     round-robin was arbitrary). Coefficients are tunable to deepen the dissolution.
+ *   - A velocity: NOMOVE/BREATHE bias holding current; RUN biases preemption; WALK is
+ *     neutral (so a calm default reduces exactly to priority + round-robin).
+ *   - B chamber (weight = emergence): flow+warmth favor continuity (keep current),
+ *     tension+pain favor preemption (switch away).
+ *   - C pressure (weight = dissonance): surface the cpu-heaviest proc; past the tunnel
+ *     threshold with an active wormhole, jump the round-robin origin (a tunnel skip). */
+static int proc_field_select(ProcessTable *pt) {
+    AM_State *fs = am_get_state();
+    float w_pressure = clampf01(fs->dissonance);   /* C */
+    float w_chamber  = clampf01(fs->emergence);    /* B */
+    float continuity = fs->flow + fs->warmth;      /* smooth: stay on current */
+    float agitation  = fs->tension + fs->pain;     /* rough: switch away      */
+    float vel_bias = 0.0f;                          /* A: tempo, always on; WALK neutral */
+    switch (fs->velocity_mode) {
+        case 0: vel_bias = +1.0f; break;   /* NOMOVE  -> hold current   */
+        case 3: vel_bias = +0.3f; break;   /* BREATHE -> gentle hold    */
+        case 2: vel_bias = -1.0f; break;   /* RUN     -> preempt        */
+        default: vel_bias = 0.0f; break;   /* WALK / BACKWARD: neutral  */
+    }
+    int tunnel = fs->wormhole_active && fs->dissonance > fs->tunnel_threshold;
+    int origin = tunnel ? (pt->sched_next + 1) % MAX_PROCS : pt->sched_next;
+
+    int best = -1;
+    float best_score = -1e30f;
+    for (int k = 0; k < MAX_PROCS; k++) {
+        int idx = (origin + k) % MAX_PROCS;
+        Process *p = &pt->procs[idx];
+        if (!(p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)
+              && p->cpu_time < p->cpu_limit)) continue;
+        int is_cur = (p->pid == K.current_pid);
+        float score = (float)p->priority * 1000.0f;                                  /* base: priority dominates */
+        score += w_pressure * ((float)p->cpu_time / (float)(p->cpu_limit > 0 ? p->cpu_limit : 1)) * 100.0f; /* C */
+        float cham = is_cur ? (continuity - agitation) : (agitation - continuity);   /* B */
+        score += w_chamber * cham * 50.0f;
+        float stick = is_cur ? vel_bias : -vel_bias;                                 /* A */
+        score += stick * fs->velocity_magnitude * 50.0f;
+        score -= (float)k * 0.001f;                                                   /* round-robin tiebreak */
+        if (score > best_score) { best_score = score; best = idx; }
+    }
+    return best;
+}
+
 static int proc_tick(ProcessTable *pt) {
     pt->tick_count++;
 
@@ -1066,8 +1118,7 @@ static int proc_tick(ProcessTable *pt) {
         }
     }
 
-    /* priority-aware + time slice preemption: full scan + reset */
-    int max_prio = -999;
+    /* time-slice preemption reset (the tick's housekeeping stays) */
     for (int i = 0; i < n; i++) {
         Process *p = &pt->procs[i];
         if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
@@ -1075,19 +1126,13 @@ static int proc_tick(ProcessTable *pt) {
                 p->slice_used = 0;
                 strcpy(p->state, "ready");
             }
-            /* only consider those under cpu limit */
-            if (p->cpu_time < p->cpu_limit && p->priority > max_prio) max_prio = p->priority;
         }
     }
-    int best_idx = -1;
-    for (int i = 0; i < n; i++) {
-        int idx = (pt->sched_next + i) % n;
-        Process *p = &pt->procs[idx];
-        if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->priority == max_prio && p->cpu_time < p->cpu_limit) {
-            best_idx = idx;
-            break;
-        }
-    }
+    /* primary selection is now governed by the AML resonance field. Priority still
+     * dominates; the field bends the choice among equal-priority ready procs (calm =
+     * round-robin, agitation = pressure/chamber/velocity). The never-none cascade below
+     * remains the guaranteed floor. */
+    int best_idx = proc_field_select(pt);
     if (best_idx < 0) {
         /* full scan fallback for any ready under limit */
         for (int i = 0; i < n; i++) {
