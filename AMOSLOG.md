@@ -42,6 +42,39 @@ affect vector — the actual AML field, vendored — so there is no throwaway in
 - Persistence: run 1 (fresh) starts phase 0.000; run 2 restores from `.soma` and starts mid-cycle
   (phase 3.556). ASan clean on the boot/field/step/persist path.
 
+## 2026-07-26 — Brick #3 (commit 3): field interface + A/B/C couplings proven + regression
+
+Commit 2 dissolved the scheduler into the field but only proved coupling A (velocity)
+behaviorally. This commit gives the field a shell handle, proves B and C the same way, and puts
+the field arc under the selftest.
+
+- **`resonate <AML directive>`** — the shell perturbs the field via `am_exec` (a command IS a
+  field perturbation): `resonate DISSONANCE 0.9`, `resonate VELOCITY RUN`, `resonate TENSION 0.7`.
+  This is the handle the scheduler reads through `proc_field_select`.
+- **B and C proven behaviorally** (same method as A), scheduling a 3-proc cohort:
+  - C (dissonance): calm `y init x z` vs `resonate DISSONANCE 0.95` → `init z x init` — pressure
+    surfaces different procs.
+  - B (chambers): calm `y init x z` vs `resonate RESONANCE/TENSION/PAIN` (emergence≈0.78) →
+    `x z amossh y` — the chamber balance bends switching.
+  - Honest scope: the field dimensions are coupled by design (DISSONANCE also lifts
+    resonance/emergence in `am_step`), so B/C are not perfectly isolated forcings; A (velocity)
+    is the cleanest-isolated proof. The point proven is that all three couplings are **live** and
+    bend selection, while a calm field reduces to round-robin.
+- **Field selftests** (53/53 now): `field_hosted`, `field_step_advances`, `field_perturb_read`.
+  The block snapshots the whole `AM_State` and restores it, so selftest leaves the live field
+  untouched (verified: post-selftest field == any single-command field).
+- **Measured finding:** the field's natural resting state after one `am_step` is resonance≈0.94,
+  emergence≈0.78 (schumann coherence drives resonance up). So the chamber weight (=emergence) is
+  live even at rest — but the affect poles (tension/pain/flow/warmth) are 0 at rest, so the
+  chamber term is weight×0 = 0, and calm scheduling still reduces to round-robin (confirmed by
+  the 53/53 selftest).
+
+### Verification
+- `make` (`-Wall -Wextra`): 0 amosoz.c errors. C selftest **53/53**; shell treaty **ALL PASSED**;
+  html selftest **43/43** (separate kernel, unaffected); ASan clean on selftest + resonate + tick.
+
+---
+
 ## 2026-07-21 — Brick #3 (commit 2): the scheduler dissolves into the field
 
 Commit 1 hosted the field. Commit 2 dissolves the round-robin: the scheduler's primary

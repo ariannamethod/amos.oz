@@ -3403,6 +3403,20 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     dispatch("cat < /etc/hostname", tmp, sizeof(tmp));
     CHECK("shell_stdin_redirect", strstr(tmp, "amosoz") != NULL);
 
+    /* Resonance field (brick #3): the field is hosted, steps deterministically, and the
+     * shell can perturb it — the substrate the scheduler now reads. Snapshot the whole
+     * AM_State first and restore it after, so selftest leaves the live field untouched. */
+    CHECK("field_hosted", am_get_state() != NULL && am_get_state()->schumann_hz > 7.0f);
+    {
+        AM_State field_snapshot = *am_get_state();
+        float p0 = am_get_state()->schumann_phase;
+        am_step(0.1f);
+        CHECK("field_step_advances", am_get_state()->schumann_phase != p0);
+        am_exec("DISSONANCE 0.9\n");
+        CHECK("field_perturb_read", am_get_state()->dissonance > 0.5f);
+        *am_get_state() = field_snapshot; /* restore: the live field is exactly as before */
+    }
+
     /* Summary */
     char header[64];
     snprintf(header, sizeof(header), "amosOZ Selftest (%d/%d passed):\n", passed, total);
@@ -3820,6 +3834,23 @@ static int cmd_field(char *out, int sz, int argc, char **argv) {
     return ERR_OK;
 }
 
+/* Perturb the resonance field from the shell — a command IS a field perturbation.
+ * The rest of the line is one AML directive (e.g. `resonate DISSONANCE 0.9`,
+ * `resonate VELOCITY RUN`, `resonate TENSION 0.7`), applied via am_exec. This is the
+ * handle the scheduler then reads through proc_field_select. */
+static int cmd_resonate(char *out, int sz, int argc, char **argv) {
+    if (argc < 2) { snprintf(out, sz, "Usage: resonate <AML directive>  (e.g. DISSONANCE 0.9, VELOCITY RUN, TENSION 0.7)"); return ERR_INVALID; }
+    char prog[MAX_CMD_LEN];
+    int n = 0;
+    for (int i = 1; i < argc; i++) n = safe_append(prog, n, (int)sizeof(prog), "%s%s", i > 1 ? " " : "", argv[i]);
+    n = safe_append(prog, n, (int)sizeof(prog), "\n");
+    int rc = am_exec(prog);
+    AM_State *s = am_get_state();
+    snprintf(out, sz, "field perturbed (%s) -> dissonance %.3f tension %.3f pain %.3f resonance %.3f emergence %.3f velocity %d",
+             rc == 0 ? "ok" : "err", s->dissonance, s->tension, s->pain, s->resonance, s->emergence, s->velocity_mode);
+    return rc == 0 ? ERR_OK : ERR_INVALID;
+}
+
 /* ─── Command Dispatcher ──────────────────────────────────────────────────── */
 static const CmdEntry CMD_TABLE[] = {
     {"help", cmd_help}, {"clear", cmd_clear}, {"uname", cmd_uname},
@@ -3849,7 +3880,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"ln", cmd_ln}, {"find", cmd_find},
     {"jobs", cmd_jobs}, {"fg", cmd_fg}, {"nohup", cmd_nohup},
     {"spec", cmd_spec}, {"doctor", cmd_doctor},
-    {"reset", cmd_reset}, {"field", cmd_field},
+    {"reset", cmd_reset}, {"field", cmd_field}, {"resonate", cmd_resonate},
     {"save", cmd_save}, {"load", cmd_load}, {"fortune", cmd_fortune},
     {NULL, NULL}
 };
