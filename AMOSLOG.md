@@ -42,6 +42,37 @@ affect vector — the actual AML field, vendored — so there is no throwaway in
 - Persistence: run 1 (fresh) starts phase 0.000; run 2 restores from `.soma` and starts mid-cycle
   (phase 3.556). ASan clean on the boot/field/step/persist path.
 
+## 2026-07-26 — Codex audit pass: 2 findings fixed (load hardening + wait/real-child)
+
+An independent Codex audit (adversarial, read-only) of the session's work confirmed the 5 earlier
+memory-safety fixes are closed and `proc_field_select` is clean (no div-by-zero — cpu_limit
+guarded; indexing within MAX_PROCS; the never-none cascade still guarantees a pick). It surfaced
+two real issues, both reproduced with tools here and fixed:
+
+- **HIGH — `cmd_load` left loaded strings non-terminated.** The earlier fix clamped `node_count`/
+  `env_count`/`cwd` but not the per-node string fields or env key/value. A crafted `.img` whose
+  fields are non-terminated made a later `env`/`ls`/`cat`/`stat` read past a field boundary
+  (bounded within the global `K` in this layout, so no ASan crash, but an over-read / adjacent-
+  memory disclosure). Fix: after load, force-terminate every fixed-size string in all `MAX_FILES`
+  nodes (path/symlink_target/content/perms/owner) and all `MAX_ENV` env entries (key/value).
+  Verified: with an all-`0xFF` crafted image, the longest `0xFF` run in `env` output is now exactly
+  127 bytes = the `value` field size (was an unbounded over-read); ASan clean.
+
+- **MEDIUM — `wait` did not observe completed real children.** `cmd_wait`'s poll loop only ran
+  `proc_tick`/`proc_wait`, never the real-child reaper, and used the drifting `current_pid` as the
+  parent. Root cause (found by instrumenting): a real child spawned at the prompt has
+  `ppid = shell_pid (2)`, but by wait-time the scheduler had drifted `current_pid` to `1`, so
+  `proc_wait(current_pid)` never matched. Fix: call `proc_reap_real()` inside the wait loop, add
+  `proc_wait_any()` (tries both `current_pid` and `shell_pid`), and give a just-spawned real child
+  a brief `usleep` to exit. Verified: `run /bin/echo hi; wait` → `reaped PID 3 status 0 after 2
+  ticks`; the virtual `fork; kill; wait` path still reaps.
+
+### Verification
+- `make` (`-Wall -Wextra`): 0 amosoz.c errors. C selftest **53/53**; shell treaty **ALL PASSED**;
+  ASan clean on: crafted-image load + `env`, real spawn + `wait`, `resonate` + `tick`.
+
+---
+
 ## 2026-07-26 — Brick #3 (commit 3): field interface + A/B/C couplings proven + regression
 
 Commit 2 dissolved the scheduler into the field but only proved coupling A (velocity)

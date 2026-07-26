@@ -2002,10 +2002,20 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
     return ERR_OK;
 }
 
+/* Reap a zombie child of either the current proc or the shell. current_pid drifts as
+ * the scheduler picks each tick, but a real child spawned at the prompt has ppid=shell_pid;
+ * checking both makes wait observe it regardless of the drift. */
+static int proc_wait_any(int *status_out) {
+    int child = proc_wait(&K.procs, K.current_pid, status_out);
+    if (child < 0 && K.shell_pid != K.current_pid) child = proc_wait(&K.procs, K.shell_pid, status_out);
+    return child;
+}
+
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
     int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
     int status = 0;
-    int child = proc_wait(&K.procs, parent, &status);
+    proc_reap_real(); /* surface any real child that has already exited as a zombie */
+    int child = proc_wait_any(&status);
     if (child >= 0) {
         snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
@@ -2019,12 +2029,18 @@ static int cmd_wait(char *out, int sz, int argc, char **argv) {
         }
     }
     for (int t=0; t<100; t++) {
+        proc_reap_real();  /* a real child that exited becomes a zombie so proc_wait can reap it */
         proc_tick(&K.procs);
-        child = proc_wait(&K.procs, parent, &status);
+        child = proc_wait_any(&status);
         if (child >= 0) {
             snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
             return ERR_OK;
         }
+        /* give a just-spawned real child a moment to run/exit before the next poll */
+        int has_live_real = 0;
+        for (int i=0; i<MAX_PROCS; i++)
+            if (K.procs.procs[i].used && K.procs.procs[i].spawned && K.procs.procs[i].real_pid > 0) { has_live_real = 1; break; }
+        if (has_live_real) usleep(2000);
     }
     snprintf(out, sz, "no zombie children (blocked timeout)");
     return ERR_OK;
@@ -2859,6 +2875,20 @@ static int cmd_load(char *out, int sz, int argc, char **argv) {
     if (K.fs.node_count < 0 || K.fs.node_count > MAX_FILES) K.fs.node_count = MAX_FILES;
     if (K.env_count < 0 || K.env_count > MAX_ENV) K.env_count = MAX_ENV;
     K.fs.cwd[MAX_PATH - 1] = '\0';
+    /* untrusted image: every fixed-size string field may be non-terminated on disk;
+     * force-terminate all of them so later strcmp/strlen/%s can't read past a field. */
+    for (int i = 0; i < MAX_FILES; i++) {
+        FSNode *nd = &K.fs.nodes[i];
+        nd->path[MAX_PATH - 1] = '\0';
+        nd->symlink_target[MAX_PATH - 1] = '\0';
+        nd->content[MAX_CONTENT - 1] = '\0';
+        nd->perms[sizeof(nd->perms) - 1] = '\0';
+        nd->owner[sizeof(nd->owner) - 1] = '\0';
+    }
+    for (int i = 0; i < MAX_ENV; i++) {
+        K.env[i].key[sizeof(K.env[i].key) - 1] = '\0';
+        K.env[i].value[sizeof(K.env[i].value) - 1] = '\0';
+    }
     snprintf(out, sz, "System image loaded from %s", fname);
     return ERR_OK;
 }
