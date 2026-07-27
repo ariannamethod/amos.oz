@@ -150,7 +150,7 @@ typedef struct {
     int cpu_time; /* cpu time consumed while running (foundation accounting) */
     int cpu_limit; /* hard cpu time limit (ticks) - enforce in scheduler */
     int cpu_violations; /* count of times limit was hit */
-    int sigmask; /* signal mask for deeper signals */
+    int numbness; /* signals this monad cannot feel; KILL and STOP pierce it */
     char mailbox[256]; /* simple IPC mailbox for send/recv */
     int   spawned;     /* 1 = backed by a real OS process (fork+exec); 0 = virtual monad (SARTRE ns contract) */
     pid_t real_pid;    /* real OS pid when spawned; 0 otherwise */
@@ -663,13 +663,13 @@ static void proc_refresh_all(void) {
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
                 "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
-                "Mem:\t%d/%d kB\nSignals:\t%d\nSigmask:\t%d\nFds:\t%d\n",
+                "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
                 K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit, K.procs.procs[i].cpu_violations,
                 K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
-                K.procs.procs[i].signals, K.procs.procs[i].sigmask, fcount);
+                K.procs.procs[i].signals, K.procs.procs[i].numbness, fcount);
             proc_write_file(ppath, buf);
 
             /* /proc/<pid>/fd list */
@@ -857,7 +857,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].cpu_time = 0;
             pt->procs[i].cpu_limit = 100000; /* default high cpu limit */
             pt->procs[i].cpu_violations = 0;
-            pt->procs[i].sigmask = 0;
+            pt->procs[i].numbness = 0;
             pt->procs[i].mailbox[0] = '\0';
             pt->procs[i].spawned = 0;
             pt->procs[i].real_pid = 0;
@@ -961,7 +961,7 @@ static int proc_exec(int pid, const char *newname) {
             strncpy(K.procs.procs[i].name, newname, 31);
             /* exec: replace image, keep fds/cwd/mem/limits/prio per minimal POSIX sim; reset signals, slice, sleep, violations */
             K.procs.procs[i].signals = 0;
-            K.procs.procs[i].sigmask = 0;
+            K.procs.procs[i].numbness = 0;
             K.procs.procs[i].sleep_ticks = 0;
             K.procs.procs[i].slice_used = 0;
             K.procs.procs[i].cpu_violations = 0; /* reset on exec */
@@ -1090,12 +1090,12 @@ static int proc_tick(ProcessTable *pt) {
     /* signal delivery for deeper IPC - respect mask (KILL/STOP can't be masked) */
     for (int i = 0; i < n; i++) {
         if (pt->procs[i].used && pt->procs[i].signals) {
-            int sigs = pt->procs[i].signals & ~pt->procs[i].sigmask;
+            int sigs = pt->procs[i].signals & ~pt->procs[i].numbness;
             if (pt->procs[i].signals & (1 << 9)) { /* SIGKILL always */
                 strcpy(pt->procs[i].state, "zombie");
                 pt->procs[i].exit_code = 9;
                 pt->procs[i].signals = 0;
-                pt->procs[i].sigmask = 0;
+                pt->procs[i].numbness = 0;
             } else if (pt->procs[i].signals & (1 << 19)) { /* SIGSTOP always */
                 strcpy(pt->procs[i].state, "stopped");
                 pt->procs[i].signals &= ~(1 << 19);
@@ -1115,7 +1115,8 @@ static int proc_tick(ProcessTable *pt) {
                 }
                 pt->procs[i].signals &= ~sigs;
             }
-            if (!pt->procs[i].signals) pt->procs[i].sigmask = 0; /* clear if none */
+            /* numbness persists across ticks — it is a property of the monad, not of the
+             * signal being delivered. A numbed signal simply stays pending until `feel`. */
         }
     }
 
@@ -1931,7 +1932,7 @@ static int cmd_fork(char *out, int sz, int argc, char **argv) {
             K.procs.procs[i].priority = p->priority;
             K.procs.procs[i].max_slice = p->max_slice;
             K.procs.procs[i].cpu_limit = p->cpu_limit;
-            K.procs.procs[i].sigmask = p->sigmask;
+            K.procs.procs[i].numbness = p->numbness;
             K.procs.procs[i].signals = 0; /* child starts clean */
             K.procs.procs[i].cpu_time = 0;
             K.procs.procs[i].cpu_violations = 0;
@@ -2212,6 +2213,43 @@ static int cmd_signal(char *out, int sz, int argc, char **argv) {
                 strcpy(K.procs.procs[i].state, "ready");
             }
             snprintf(out, sz, "signaled pid %d sig %d", pid, sig);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+/* A monad's numbness: which signals it cannot feel. A numbed signal is not lost — it
+ * stays pending until `feel` restores the sense and the next tick delivers it. KILL and
+ * STOP pierce any numbness; nothing in this system may be numb to its own end. */
+static int cmd_numb(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: numb <pid> <sig>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int sig = atoi(argv[2]);
+    if (sig == 9 || sig == 19) {
+        snprintf(out, sz, "numb: sig %d pierces numbness — no monad is numb to its end", sig);
+        return ERR_INVALID;
+    }
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].numbness |= (1 << sig);
+            snprintf(out, sz, "pid %d numb to sig %d (numbness %d)", pid, sig, K.procs.procs[i].numbness);
+            return ERR_OK;
+        }
+    }
+    snprintf(out, sz, "no such pid");
+    return ERR_INVALID;
+}
+
+static int cmd_feel(char *out, int sz, int argc, char **argv) {
+    if (argc < 3) { snprintf(out, sz, "Usage: feel <pid> <sig>"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    int sig = atoi(argv[2]);
+    for (int i=0; i<MAX_PROCS; i++) {
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+            K.procs.procs[i].numbness &= ~(1 << sig);
+            snprintf(out, sz, "pid %d feels sig %d again (numbness %d)", pid, sig, K.procs.procs[i].numbness);
             return ERR_OK;
         }
     }
@@ -3437,6 +3475,35 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     /* Resonance field (brick #3): the field is hosted, steps deterministically, and the
      * shell can perturb it — the substrate the scheduler now reads. Snapshot the whole
      * AM_State first and restore it after, so selftest leaves the live field untouched. */
+    /* Numbness: a monad cannot feel what it is numb to, and numbness outlives the tick */
+    {
+        int npid = proc_spawn(&K.procs, "numb_proc", 0);
+        int ni = -1;
+        for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == npid) ni = i;
+        K.procs.procs[ni].numbness = (1 << 15);       /* numb to TERM */
+        K.procs.procs[ni].signals  = (1 << 18);       /* an unrelated CONT lands and clears */
+        proc_tick(&K.procs);
+        CHECK("numbness_outlives_delivery", K.procs.procs[ni].numbness == (1 << 15));
+        K.procs.procs[ni].signals = (1 << 15);        /* now the numbed TERM arrives */
+        proc_tick(&K.procs);
+        proc_tick(&K.procs);
+        CHECK("numb_blocks_delivery", strcmp(K.procs.procs[ni].state, "zombie") != 0
+            && K.procs.procs[ni].numbness == (1 << 15));
+        K.procs.procs[ni].numbness = 0;                /* feel again */
+        proc_tick(&K.procs);
+        CHECK("feel_delivers_pending", strcmp(K.procs.procs[ni].state, "zombie") == 0);
+        K.procs.procs[ni].used = 0;
+
+        int kpid = proc_spawn(&K.procs, "numb_kill", 0);
+        int ki = -1;
+        for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == kpid) ki = i;
+        K.procs.procs[ki].numbness = ~0;               /* numb to everything it may be numb to */
+        K.procs.procs[ki].signals  = (1 << 9);         /* KILL */
+        proc_tick(&K.procs);
+        CHECK("kill_pierces_numbness", strcmp(K.procs.procs[ki].state, "zombie") == 0);
+        K.procs.procs[ki].used = 0;
+    }
+
     CHECK("field_hosted", am_get_state() != NULL && am_get_state()->schumann_hz > 7.0f);
     {
         AM_State field_snapshot = *am_get_state();
@@ -3897,7 +3964,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"pause", cmd_pause}, {"send", cmd_send},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"numb", cmd_numb}, {"feel", cmd_feel}, {"pause", cmd_pause}, {"send", cmd_send},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},
