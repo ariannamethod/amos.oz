@@ -12,7 +12,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const htmlPath = path.join(__dirname, "..", "reffs", "amosoz.html");
 const html = fs.readFileSync(htmlPath, "utf8");
 
-const match = html.match(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/i);
+/* An end tag closes the script even when it carries trailing garbage — `</script foo>`
+ * is a close, `</scriptfoo>` is not. \s* was too narrow and let content hide past it. */
+const match = html.match(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i);
 if (!match) {
   console.error("html_selftest: no <script> block in amosoz.html");
   process.exit(1);

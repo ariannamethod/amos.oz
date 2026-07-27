@@ -15,6 +15,24 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-27 — The 07-20 CodeQL fix was incomplete: `js/bad-tag-filter` reopened
+
+The 07-20 entry below says three CodeQL alerts were sealed. Code scanning disagrees: that
+rule closed one alert and immediately opened a new one at the same line — `tests/html_selftest.mjs:15`.
+`<\/script\s*>` still under-matches, because an end tag closes the script even when it carries
+trailing garbage: `</script\t\n bar>` is a close. Content could hide past such a tag and the
+harness would never see it.
+
+- Pattern is now `/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i`. The `\b` keeps it honest in
+  the other direction — `</scriptfoo>` is not an end tag and must not match.
+
+### Verification
+- Four cases through node, old vs new: `</script>` ✓/✓, `</SCRIPT >` ✓/✓,
+  `</script\t\n bar>` **✗ old / ✓ new** (the reopened alert), `</scriptfoo>` ✗/✗ (correctly refused).
+- `node tests/html_selftest.mjs` → **43/43 PASSED**; the regex still extracts the kernel.
+
+---
+
 ## 2026-07-27 — Numbness: the signal mask was unreachable, and it did not survive delivery
 
 `Process.sigmask` was checked in the delivery path (`signals & ~sigmask`), cloned by `fork`,
