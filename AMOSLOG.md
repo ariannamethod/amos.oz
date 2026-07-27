@@ -15,6 +15,46 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-27 — Numbness: the signal mask was unreachable, and it did not survive delivery
+
+`Process.sigmask` was checked in the delivery path (`signals & ~sigmask`), cloned by `fork`,
+printed in `/proc/<pid>/status` — and **never set by anything**. Every write in the file was a
+zero. The mask was a feature the README claimed (`signals + sigmask`, "masks respected") and
+the kernel could not perform. Two things were missing, and either one alone would have left it
+dead:
+
+- **No way in.** `numb <pid> <sig>` / `feel <pid> <sig>` — the mask in this system's own
+  register rather than a POSIX transliteration. A numbed signal is not dropped: it stays
+  pending until the monad feels again, and the next tick delivers it. `numb <pid> 9|19` is
+  refused — KILL and STOP pierce any numbness.
+- **No persistence.** `proc_tick` ended with `if (!signals) sigmask = 0;`. Numbness is a
+  property of the monad, not of the signal being delivered, so the line is gone. Note the
+  trigger is *not* an idle tick — the wipe sat inside `if (signals)`, so it fired when an
+  unrelated signal was delivered and cleared: a proc numb to TERM that received a CONT lost
+  its numbness silently, and the next TERM killed it.
+
+The field is now `Process.numbness`; `/proc/<pid>/status` reports `Numbness:`. Naming follows
+the SARTRE register the roadmap points at (`sartre_kernel.h` on `yent-inference` `origin/main`:
+tongue / overlay / namespace / monad) — `numb` and `feel` are new words in that register, not
+borrowed ones. Side effect the roadmap predicted: these names do not collide with any Unix
+command, which is what made this area unauditable by vocabulary.
+
+### Verification
+- Selftest **53 → 57**, 0 FAIL: `numbness_outlives_delivery`, `numb_blocks_delivery`,
+  `feel_delivers_pending`, `kill_pierces_numbness`.
+- **Falsification, not assertion:** re-inserting the wipe line into a scratch build turns the
+  suite red — C selftest `[FAIL] numbness_outlives_delivery` + `[FAIL] numb_blocks_delivery`
+  (2 TESTS FAILED), shell treaty `FAIL: numbness did not outlive an unrelated delivery`. The
+  first version of the C check did *not* fail that build; it was rewritten until it did.
+- End-to-end: `run victim; numb 3 15; signal 3 18; tick; signal 3 15; tick; tick; ps` keeps
+  victim in the table; the same input against the wipe build loses it. `feel 3 15` then
+  delivers the pending TERM on the next tick.
+- `grep -c sigmask amosoz.c` → **0** (rename is complete, not half-applied).
+- Regression: `make` 0 errors; shell treaty **ALL PASSED**; `html_selftest` **43/43**;
+  ASan clean on the selftest and numbness paths.
+
+---
+
 ## 2026-07-27 — CRITICAL: stack overflow on a 9-stage pipeline (`shell_execute_line`)
 
 A plain shell line crashed the kernel. `shell_execute_line` splits on `|` into

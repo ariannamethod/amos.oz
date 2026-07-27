@@ -39,6 +39,15 @@ echo "$out" | grep -q needle || { echo "FAIL: grep"; exit 1; }
 out=$(run 'ln -s /etc/motd /tmp/ml' 'cat /tmp/ml')
 echo "$out" | grep -q amosOZ || { echo "FAIL: symlink"; exit 1; }
 
+out=$(run 'run victim' 'numb 3 15' 'signal 3 18' 'tick' 'signal 3 15' 'tick' 'tick' 'ps')
+echo "$out" | grep -qE '^3[[:space:]]+victim' || { echo "FAIL: numbness did not outlive an unrelated delivery"; exit 1; }
+
+out=$(run 'run victim' 'numb 3 15' 'signal 3 15' 'tick' 'feel 3 15' 'tick' 'ps')
+if echo "$out" | grep -qE '^3[[:space:]]+victim'; then echo "FAIL: feel did not deliver the pending signal"; exit 1; fi
+
+out=$(run 'run victim' 'numb 3 9')
+echo "$out" | grep -q 'pierces numbness' || { echo "FAIL: KILL is maskable"; exit 1; }
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 
