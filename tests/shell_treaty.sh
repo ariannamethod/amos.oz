@@ -18,6 +18,12 @@ echo "$out" | grep -q line2 || { echo "FAIL: append"; exit 1; }
 out=$(run 'echo piped | cat')
 echo "$out" | grep -q piped || { echo "FAIL: pipe"; exit 1; }
 
+out=$(run 'echo PIPE8 | cat | cat | cat | cat | cat | cat | cat')
+echo "$out" | grep -q PIPE8 || { echo "FAIL: pipeline at MAX_PIPE_PARTS"; exit 1; }
+
+out=$(run 'echo PIPE9 | cat | cat | cat | cat | cat | cat | cat | cat')
+echo "$out" | grep -q 'too many pipeline stages' || { echo "FAIL: pipeline overflow not refused"; exit 1; }
+
 out=$(run 'cat < /etc/hostname')
 echo "$out" | grep -q amosoz || { echo "FAIL: stdin redirect"; exit 1; }
 

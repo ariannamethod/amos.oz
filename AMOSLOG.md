@@ -15,6 +15,35 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-07-27 — CRITICAL: stack overflow on a 9-stage pipeline (`shell_execute_line`)
+
+A plain shell line crashed the kernel. `shell_execute_line` splits on `|` into
+`pipe_parts[8][MAX_CMD_LEN]`; the splitting loop stops at `nparts < 8`, but the **tail**
+segment was written afterwards with no bound at all. A pipeline of 9 segments therefore
+wrote 1023 bytes into `pipe_parts[8]` — one full row past the array, straight into the
+stack frame. Present since `036d16a` (the v0.3.0 treaty shell), and missed by the earlier
+ASan pass and the Codex audit because neither drove a pipeline past the cap.
+
+- `MAX_PIPE_PARTS` replaces the literal `8` in the declaration and the loop — the drift
+  between those two literals and the unguarded tail is what the bug was made of.
+- The tail write now takes the same bound. A pipeline that does not fit is **refused**
+  (`amosoz: too many pipeline stages (max 8)`) rather than silently losing its stages.
+- Both writes moved `strncpy` → `snprintf`, which also terminates a segment of exactly
+  `MAX_CMD_LEN - 1` bytes (the old `strncpy` left that case unterminated).
+
+### Verification
+- Repro before the fix: `echo PIPE9 | cat ×8` → ASan `stack-buffer-overflow, WRITE of size
+  1023 at amosoz.c:3783`; the plain build aborts with **rc 134**.
+- After: the same input exits **rc 0** and prints the refusal; ASan errors **0**.
+- Boundary intact: `echo PIPE8 | cat ×7` (exactly 8 stages) still pipes through, ASan clean.
+- A segment of exactly 1023 bytes: ASan clean.
+- Both cases are now locked in `tests/shell_treaty.sh` — the new suite run against a build
+  of the pre-fix `amosoz.c` dies with **rc 134**, so the tests genuinely fail on the old code.
+- Regression: `make` 0 errors; C selftest **53/53**, 0 FAIL; shell treaty **ALL PASSED**;
+  `html_selftest` **43/43**; ASan clean on the selftest path.
+
+---
+
 ## 2026-07-21 — Brick #3 (commit 1): the AML resonance field — hosted, evolving, persisted
 
 Brick #3 dissolves the discrete tick into a continuous field. Commit 1 brings the **real** field

@@ -61,6 +61,7 @@ static inline int safe_append(char *buf, int offset, int bufsz, const char *fmt,
 #define MAX_HOOKS 8
 #define MAX_HOOK_SUBS 8
 #define MAX_CMD_LEN 1024
+#define MAX_PIPE_PARTS 8
 #define MEM_TOTAL_KB 65536
 
 /* ─── Error Codes ─────────────────────────────────────────────────────────── */
@@ -3763,7 +3764,7 @@ static int shell_execute_segment(const char *seg, const char *line, char *output
 
 static int shell_execute_line(const char *line, char *output, int outsize) {
     output[0] = '\0';
-    char pipe_parts[8][MAX_CMD_LEN];
+    char pipe_parts[MAX_PIPE_PARTS][MAX_CMD_LEN];
     int nparts = 0;
     char tmp[MAX_CMD_LEN];
     strncpy(tmp, line, MAX_CMD_LEN - 1);
@@ -3771,16 +3772,25 @@ static int shell_execute_line(const char *line, char *output, int outsize) {
 
     char *save = NULL;
     char *seg = tmp;
-    for (char *p = tmp; *p && nparts < 8; p++) {
+    for (char *p = tmp; *p && nparts < MAX_PIPE_PARTS; p++) {
         if (*p == '|') {
             *p = '\0';
             str_trim_inplace(seg);
-            if (seg[0]) strncpy(pipe_parts[nparts++], seg, MAX_CMD_LEN - 1);
+            if (seg[0]) snprintf(pipe_parts[nparts++], MAX_CMD_LEN, "%s", seg);
             seg = p + 1;
         }
     }
     str_trim_inplace(seg);
-    if (seg[0]) strncpy(pipe_parts[nparts++], seg, MAX_CMD_LEN - 1);
+    if (seg[0]) {
+        /* the loop stops scanning once the table is full, so the tail needs the same
+         * bound — without it a 9-segment pipeline wrote past pipe_parts. Refuse the
+         * line rather than silently dropping the stages that did not fit. */
+        if (nparts >= MAX_PIPE_PARTS) {
+            snprintf(output, outsize, "amosoz: too many pipeline stages (max %d)", MAX_PIPE_PARTS);
+            return ERR_INVALID;
+        }
+        snprintf(pipe_parts[nparts++], MAX_CMD_LEN, "%s", seg);
+    }
     if (nparts == 0) return ERR_OK;
 
     char pipe_buf[MAX_CONTENT];
