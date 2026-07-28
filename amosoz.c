@@ -919,6 +919,61 @@ static void proc_reap_real(void) {
     }
 }
 
+/* An AML program is a monad's whole life: it runs inside the quantum that spawned it, is
+ * charged for the work it did, and is a zombie the moment it is finished — so `wait` reaps
+ * it exactly like a real child. Synchronous on purpose: the field (`AM_State G` in the
+ * vendored AML) is a singleton with no lock, so a threaded monad would race the main loop's
+ * am_step. Budgeted execution needs a step/resume API AML does not have yet. */
+static int aml_program_lines(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[MAX_CMD_LEN];
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '\n') n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static int is_aml_target(const char *name) {
+    int len = (int)strlen(name);
+    return len > 4 && strcmp(name + len - 4, ".aml") == 0;
+}
+
+static int proc_aml_spawn(const char *path, const char *label, char *out, int sz) {
+    int lines = aml_program_lines(path);
+    if (lines < 0) { snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
+
+    /* the shell spawned this monad, so the shell is its parent — current_pid drifts with the
+     * scheduler and parenting to the drift is what made `wait` miss real children before */
+    int pid = proc_spawn(&K.procs, label, K.shell_pid > 0 ? K.shell_pid : 1);
+    if (pid < 0) { snprintf(out, sz, "run: process table full"); return ERR_NO_MEMORY; }
+    int idx = -1;
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { idx = i; break; }
+
+    strcpy(K.procs.procs[idx].state, "running");
+    int rc = am_exec_file(path);
+    K.procs.procs[idx].cpu_time += lines;   /* a line of AML is a unit of work */
+    K.procs.procs[idx].ticks    += 1;
+    K.procs.procs[idx].exit_code = rc;
+    strcpy(K.procs.procs[idx].state, "zombie");
+    /* the monad died inside this command; hold the auto-tick so its parent — not init —
+     * gets the chance to collect it, the way `fg` holds context */
+    K.suppress_next_auto_tick = 1;
+
+    if (rc != 0)
+        snprintf(out, sz, "AML monad '%s' pid %d failed: %s (cpu charged %d)",
+                 label, pid, am_get_error(), lines);
+    else
+        snprintf(out, sz, "AML monad '%s' pid %d ran %d lines, rc 0 (cpu charged %d)",
+                 label, pid, lines, lines);
+    return rc == 0 ? ERR_OK : ERR_IO;
+}
+
 static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
     for (int i = 0; i < MAX_PROCS; i++) {
         if (pt->procs[i].used && pt->procs[i].pid == pid) {
@@ -1881,6 +1936,10 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
      * process slot (fork+exec); anything else is a virtual monad, as before — the same
      * spawned-vs-monad split as SARTRE namespaces. (.amos scripts run via the shell;
      * .aml targets are recognized but their runtime is wired later.) */
+    /* an AML program is readable, not executable — it runs on the field, not on the CPU.
+     * A named .aml target is always an AML claim: unreadable is an error, not a monad. */
+    if (is_aml_target(argv[1]))
+        return proc_aml_spawn(argv[1], argv[1], out, sz);
     if (strchr(argv[1], '/') && access(argv[1], X_OK) == 0) {
         char *xargv[34];
         int xc = 0;
@@ -1905,7 +1964,9 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
             snprintf(out, sz, "Started slot '%s' -> %s pid %d (spawned)", slot->name, slot->target, pid);
             return ERR_OK;
         }
-        /* script / aml kinds recognized; their runtimes are wired later */
+        if (strcmp(slot->kind, "aml") == 0)
+            return proc_aml_spawn(slot->target, slot->name, out, sz);
+        /* script kind recognized; its runtime is wired later */
         snprintf(out, sz, "run: slot '%s' kind '%s' recognized — runtime wired later", slot->name, slot->kind);
         return ERR_INVALID;
     }
@@ -3502,6 +3563,26 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         proc_tick(&K.procs);
         CHECK("kill_pierces_numbness", strcmp(K.procs.procs[ki].state, "zombie") == 0);
         K.procs.procs[ki].used = 0;
+    }
+
+    /* An AML program is a monad: it runs, moves the field, is charged, and dies a zombie */
+    {
+        const char *apath = "/tmp/amos_selftest.aml";
+        FILE *af = fopen(apath, "w");
+        if (af) { fputs("DISSONANCE 0.9\n", af); fclose(af); }
+        AM_State field_snapshot = *am_get_state();
+        char abuf[256];
+        int arc = proc_aml_spawn(apath, "selftest_monad", abuf, sizeof(abuf));
+        int ai = -1;
+        for (int i = 0; i < MAX_PROCS; i++)
+            if (K.procs.procs[i].used && strcmp(K.procs.procs[i].name, "selftest_monad") == 0) ai = i;
+        CHECK("aml_monad_runs", af != NULL && arc == ERR_OK && ai >= 0
+            && am_get_state()->dissonance > 0.5f
+            && K.procs.procs[ai].cpu_time == 1
+            && strcmp(K.procs.procs[ai].state, "zombie") == 0);
+        if (ai >= 0) K.procs.procs[ai].used = 0;
+        *am_get_state() = field_snapshot; /* restore: the live field is exactly as before */
+        remove(apath);
     }
 
     CHECK("field_hosted", am_get_state() != NULL && am_get_state()->schumann_hz > 7.0f);
