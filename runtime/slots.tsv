@@ -1,2 +1,3 @@
 slot	label	kind	state	target	notes
 hello	hello-demo	baked	wired	/bin/echo	demo real slot — `run hello <text>` prints via a real /bin/echo
+pulse	field-pulse	aml	wired	runtime/pulse.aml	a monad whose whole life is three field directives

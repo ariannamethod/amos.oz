@@ -11,7 +11,9 @@ Dedicated to **Amos Oz** (עוז).
 
 This is the **AMOS body** (foundation): per-process isolation (cwd, open_fds[32], owned memory blocks + limits, cpu_time/limit/violations, signals + numbness, priority, max_slice, mailbox), scheduler (priority + slice preemption + hard cpu limits + no-'none' guarantee), current_pid + shell_pid context, signals, devices, rich /proc, fork (full clone)/exec (replace+reset), wait, blocking, IPC via mailbox/send.
 
-Resonance / OZ layer (θ, actors, AML hooks) — later, after foundation is solid. C is the center.
+The AML resonance field is **hosted, not planned**: it boots with the kernel, advances one step
+per command, and the scheduler reads it to choose among equal-priority procs. An `.aml` program
+runs as a monad — spawned, charged, reaped. C is the center.
 
 ## Quick Start
 
@@ -56,6 +58,7 @@ Core OS primitives (AMOS body):
 | Shell / IPC | `echo`, `env`, `set`, `unset`, `export`, `source`, `history`, `which`, `exec`, `test`, `send` (mailbox IPC) |
 | Logic / Syscall | `true`, `false`, `syscall` |
 | OZ / Meta | `oz`, `slots`, `modules`, `overhead`, `hooks`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
+| Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program runs as a monad) |
 | Persist | `save`, `load` |
 
 New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership (no global fallback), current_pid + shell_pid for all context/parent/prompt/cwd, signals with numbness, blocking, fork (clones fds/cwd/limits/numbness/owned + resets child), exec (reset signals/numbness/slice/violations), unified devices, ring ledger, rich /proc + per-pid files, scheduler guarantee (never none).
@@ -74,7 +77,7 @@ New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership 
 - current_pid + shell_pid context everywhere (prompt, pwd, resolve, ownership, parent in spawn/fork/wait/exec, fg sticks via suppress).
 - Auto time advance (main) + manual `tick`; fg suppresses auto-tick.
 
-**OZ (field)** — the extension layer (modules, slots, hooks, contracts, ledger provenance) — built on top of the solid AMOS body. Not mixed in yet.
+**OZ (field)** — the extension layer (modules, slots, hooks, contracts, ledger provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `proc_field_select` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
 
 Purpose: single-file, self-contained, llm.c-grade minimal OS. C is the center. Everything verifiable in one file. Go/goroutines layer comes *around* it later.
 
@@ -107,13 +110,16 @@ The point is the **single C file** as the complete, self-contained algorithm. Py
 - Current context everywhere: current_pid + shell_pid for ownership/parent/prompt/cwd in all paths; strict no-fallback mem.
 - All in **one self-contained C file**.
 
-**Next (still foundation, no resonance yet):**
-- Optimization of the body (without leaving single-file constraint yet).
-- Go layer with goroutines *around* the C kernel (concurrency for procs, drivers, multiple users, channel IPC over the single-file core).
+**Resonance — done, not pending:** AML field hosted and evolving, scheduler dissolved into it,
+`.soma` persistence, `resonate` as a shell handle, `.aml` programs running as monads.
 
-Resonance / OZ (θ, actors, AML) only after the concrete body + Go layer is solid.
-
-Resonance / OZ layer (θ, actors, AML) — only after the concrete is solid.
+**Next:**
+- Per-monad field slice: the shared field stays the system weather, each monad gets a thin slice
+  its own AML program perturbs and the scheduler reads as "weather × own state".
+- Budgeted `.aml` execution — a monad currently consumes its quantum whole. Real time-slicing
+  needs an `am_exec_step` / `am_resume` API the AML canon does not have yet.
+- Go layer with goroutines *around* the C kernel. Threads stay outside the kernel while the AML
+  field is an unlocked singleton — a threaded monad would race the main loop's `am_step`.
 
 ## Design Principles
 

@@ -5,6 +5,8 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ## Roadmap (open — not yet done)
 
+- **`.aml` budgeted execution.** A monad currently consumes its quantum whole (D1). Real time-slicing needs an `am_exec_step` / `am_resume` API the canon does not have; that is upstream work on `ariannamethod.ai`, on its own branch, by the maintainer's word.
+- **Per-monad field slice (D2).** Shared field stays the system weather; each monad gets a thin slice (pain / tension / flow / warmth / velocity) that its own AML program perturbs and `proc_field_select` reads as "weather x own state".
 - **Resonant renaming.** Move internal function/command names toward the resonant register of
   SARTRE (schumann / overlay / tongue / namespace / prophecy) and AML (destiny / prophecy /
   pain / wormhole / scar), as amosOZ grows its SARTRE-compatible resonance core. The Unix-treaty
@@ -12,6 +14,47 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
   internals take the resonant names. This cascades into the command table and touches the treaty
   identity — do it deliberately in one pass, not casually. (Side effect: relaxes vocabulary-based
   classifier pressure on routine OS-code.)
+
+---
+
+## 2026-07-28 — Brick D1: an AML program is a monad (`run <x.aml>` executes)
+
+`run` on kind `aml` answered "runtime wired later" since brick #2. It runs now. An AML program
+is a monad's whole life: it is spawned, it executes, it is charged for the work it did, and it
+is a zombie the moment it finishes — so `wait` reaps it exactly like a real child.
+
+- `run <path>.aml` and manifest slots of kind `aml` both go through `proc_aml_spawn` →
+  `am_exec_file`. A named `.aml` target is always an AML claim: unreadable is an **error**, not
+  a silent fallback to a virtual monad (the first cut got this wrong and spawned a phantom).
+- **Charge:** `cpu_time += ` non-empty lines of the program. A line of AML is a unit of work.
+  Deterministic — no wall clock, so the accounting is reproducible like the rest of the tick.
+- **Parenthood:** the monad's parent is `shell_pid`, not `current_pid`. Parenting to the drifting
+  `current_pid` is exactly what made `wait` miss real children (fixed 07-26 from the other end);
+  the first cut here reproduced that bug and `wait` reported "no zombie children".
+- The auto-tick is held after an AML run (`suppress_next_auto_tick`, the mechanism `fg` uses),
+  so the parent — not init — gets the chance to collect the monad.
+
+**Synchronous on purpose, and the reason is measured, not stylistic.** The field is
+`static AM_State G` (`aml/ariannamethod.c:91`) with **0** mutexes covering it — the only two
+locks in the file guard spawn slots and channels. `am_spawn_thread_fn` calls `am_exec` on a
+pthread (`:2824-2827`), and `am_step` touches `G` on 28 lines, so a threaded monad would race
+the main loop by construction. Budgeted execution is the right answer to a long program, but
+`am_exec_step` / `am_resume` do not exist (**0** matches in the vendored AML). Both roads lead
+to the canonical `ariannamethod.ai` — 499 `G.` references across 41 functions, 131 public
+`am_*`, 19 repos on that canon — so they travel on their own branch, by the maintainer's word.
+Known limitation, stated rather than hidden: a long AML program consumes the quantum whole.
+
+### Verification
+- Field moves: `dissonance` 0.000 → **0.700** after `run runtime/pulse.aml`; `ps` shows the
+  monad charged `CpuTime 3` for a 3-line program; `wait` → `reaped PID 3 status 0`.
+- Manifest path: `run pulse` (kind `aml`, `runtime/slots.tsv`) moves the field identically.
+- Refusal: `run runtime/nope.aml` → `cannot read AML program`, and **no** phantom row in `ps`.
+- Selftest **57 → 58**, 0 FAIL (`aml_monad_runs`). The check writes its own `.aml` to `/tmp`,
+  so it does not depend on cwd, and snapshots/restores the field: `selftest` then `field`
+  reports `dissonance 0.002`, identical to a run without the selftest.
+- shell treaty **ALL PASSED** with four new cases (monad runs, parent reaps, field moved,
+  missing file refused without a phantom); `html_selftest` **43/43**; `make` 0 errors;
+  ASan **0** errors on selftest, run-aml, slot and missing-file paths.
 
 ---
 

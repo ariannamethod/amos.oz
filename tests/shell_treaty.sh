@@ -48,6 +48,18 @@ if echo "$out" | grep -qE '^3[[:space:]]+victim'; then echo "FAIL: feel did not 
 out=$(run 'run victim' 'numb 3 9')
 echo "$out" | grep -q 'pierces numbness' || { echo "FAIL: KILL is maskable"; exit 1; }
 
+out=$(run "run $ROOT/runtime/pulse.aml" 'wait' 'field')
+echo "$out" | grep -q 'AML monad' || { echo "FAIL: .aml did not run as a monad"; exit 1; }
+echo "$out" | grep -q 'reaped PID' || { echo "FAIL: parent could not reap the AML monad"; exit 1; }
+if echo "$out" | grep -q 'dissonance 0.000'; then echo "FAIL: AML monad did not move the field"; exit 1; fi
+
+out=$(run 'run pulse' 'field')
+echo "$out" | grep -q 'AML monad' || { echo "FAIL: manifest slot of kind aml did not run"; exit 1; }
+
+out=$(run 'run /nonexistent/nope.aml' 'ps')
+echo "$out" | grep -q 'cannot read AML program' || { echo "FAIL: missing .aml not refused"; exit 1; }
+if echo "$out" | grep -q 'nope.aml.*ready'; then echo "FAIL: missing .aml left a phantom monad"; exit 1; fi
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 
