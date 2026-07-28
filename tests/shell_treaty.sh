@@ -6,6 +6,10 @@ BIN="$ROOT/amosoz"
 [ -x "$BIN" ] || { echo "build first: make"; exit 1; }
 
 run() {
+  # each case starts from a cold field: amosoz persists the AML field to amos.soma on exit,
+  # so without this a case inherits whatever weather the previous one left and the suite
+  # becomes order-dependent (the .aml case perturbs tension/pain and bends later scheduling)
+  rm -f amos.soma "$ROOT/amos.soma"
   printf '%s\n' "$@" | "$BIN" 2>&1
 }
 
@@ -56,9 +60,24 @@ if echo "$out" | grep -q 'dissonance 0.000'; then echo "FAIL: AML monad did not 
 out=$(run 'run pulse' 'field')
 echo "$out" | grep -q 'AML monad' || { echo "FAIL: manifest slot of kind aml did not run"; exit 1; }
 
+out=$(run "run $ROOT/runtime/pulse.aml" 'mood 3')
+echo "$out" | grep -q 'tension 0.400' || { echo "FAIL: AML monad did not record its delta as mood"; exit 1; }
+
 out=$(run 'run /nonexistent/nope.aml' 'ps')
 echo "$out" | grep -q 'cannot read AML program' || { echo "FAIL: missing .aml not refused"; exit 1; }
 if echo "$out" | grep -q 'nope.aml.*ready'; then echo "FAIL: missing .aml left a phantom monad"; exit 1; fi
+
+TICKS="tick tick tick tick tick tick tick tick tick tick tick tick"
+cpu_of() { echo "$1" | awk -v n="$2" '$2==n{print $5; exit}'; }
+
+out=$(run 'run alpha' 'run beta' 'mood 3 tension 0.9' 'mood 4 warmth 0.9' $TICKS 'ps')
+a=$(cpu_of "$out" alpha); b=$(cpu_of "$out" beta)
+[ -n "$a" ] && [ -n "$b" ] || { echo "FAIL: mood cohort missing from ps"; exit 1; }
+[ "$a" -gt "$b" ] || { echo "FAIL: mood did not bend the scheduler ($a vs $b)"; exit 1; }
+
+out=$(run 'run alpha' 'run beta' $TICKS 'ps')
+a=$(cpu_of "$out" alpha); b=$(cpu_of "$out" beta)
+[ "$a" = "$b" ] || { echo "FAIL: empty mood no longer reduces to round-robin ($a vs $b)"; exit 1; }
 
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }

@@ -152,6 +152,11 @@ typedef struct {
     int cpu_violations; /* count of times limit was hit */
     int numbness; /* signals this monad cannot feel; KILL and STOP pierce it */
     char mailbox[256]; /* simple IPC mailbox for send/recv */
+    /* the monad's own weather. The shared field is the system's; this is what THIS monad
+     * carries and argues with. All zero = no argument, so the scheduler reduces to what it
+     * was before the slice existed. Velocity is deliberately absent: tempo belongs to the
+     * system, not to one monad. */
+    float mood_pain, mood_tension, mood_flow, mood_warmth;
     int   spawned;     /* 1 = backed by a real OS process (fork+exec); 0 = virtual monad (SARTRE ns contract) */
     pid_t real_pid;    /* real OS pid when spawned; 0 otherwise */
 } Process;
@@ -663,13 +668,16 @@ static void proc_refresh_all(void) {
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
                 "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
-                "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\n",
+                "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\n"
+                "Mood:\tpain %.3f tension %.3f flow %.3f warmth %.3f\n",
                 K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
                 K.procs.procs[i].state,
                 K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit, K.procs.procs[i].cpu_violations,
                 K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
                 K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
-                K.procs.procs[i].signals, K.procs.procs[i].numbness, fcount);
+                K.procs.procs[i].signals, K.procs.procs[i].numbness, fcount,
+                K.procs.procs[i].mood_pain, K.procs.procs[i].mood_tension,
+                K.procs.procs[i].mood_flow, K.procs.procs[i].mood_warmth);
             proc_write_file(ppath, buf);
 
             /* /proc/<pid>/fd list */
@@ -859,6 +867,8 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].cpu_violations = 0;
             pt->procs[i].numbness = 0;
             pt->procs[i].mailbox[0] = '\0';
+            pt->procs[i].mood_pain = pt->procs[i].mood_tension = 0.0f;
+            pt->procs[i].mood_flow = pt->procs[i].mood_warmth = 0.0f;
             pt->procs[i].spawned = 0;
             pt->procs[i].real_pid = 0;
             return pt->procs[i].pid;
@@ -956,7 +966,15 @@ static int proc_aml_spawn(const char *path, const char *label, char *out, int sz
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { idx = i; break; }
 
     strcpy(K.procs.procs[idx].state, "running");
+    /* what the program moves in the shared weather is also what this monad now carries:
+     * the delta is its mood. The weather keeps the change; the monad keeps its share. */
+    AM_State *fs = am_get_state();
+    float b_pain = fs->pain, b_tension = fs->tension, b_flow = fs->flow, b_warmth = fs->warmth;
     int rc = am_exec_file(path);
+    K.procs.procs[idx].mood_pain    = fs->pain    - b_pain;
+    K.procs.procs[idx].mood_tension = fs->tension - b_tension;
+    K.procs.procs[idx].mood_flow    = fs->flow    - b_flow;
+    K.procs.procs[idx].mood_warmth  = fs->warmth  - b_warmth;
     K.procs.procs[idx].cpu_time += lines;   /* a line of AML is a unit of work */
     K.procs.procs[idx].ticks    += 1;
     K.procs.procs[idx].exit_code = rc;
@@ -1113,6 +1131,11 @@ static int proc_field_select(ProcessTable *pt) {
         score += w_pressure * ((float)p->cpu_time / (float)(p->cpu_limit > 0 ? p->cpu_limit : 1)) * 100.0f; /* C */
         float cham = is_cur ? (continuity - agitation) : (agitation - continuity);   /* B */
         score += w_chamber * cham * 50.0f;
+        /* B': the monad's own argument. Its own tension/pain demand the CPU; its own
+         * flow/warmth are content to yield. Weighted by the same shared emergence — the
+         * weather decides how loudly anyone gets to argue. An empty mood adds exactly 0. */
+        float own_demand = (p->mood_tension + p->mood_pain) - (p->mood_flow + p->mood_warmth);
+        score += w_chamber * own_demand * 50.0f;
         float stick = is_cur ? vel_bias : -vel_bias;                                 /* A */
         score += stick * fs->velocity_magnitude * 50.0f;
         score -= (float)k * 0.001f;                                                   /* round-robin tiebreak */
@@ -1173,6 +1196,17 @@ static int proc_tick(ProcessTable *pt) {
             /* numbness persists across ticks — it is a property of the monad, not of the
              * signal being delivered. A numbed signal simply stays pending until `feel`. */
         }
+    }
+
+    /* a mood is passing weather, not a caste: it fades for every monad each tick. Without
+     * this the discharge below only reaches whoever is being served, and a monad content to
+     * yield would carry that contentment forever and never be scheduled again. */
+    for (int i = 0; i < n; i++) {
+        if (!pt->procs[i].used) continue;
+        pt->procs[i].mood_pain    *= 0.90f;
+        pt->procs[i].mood_tension *= 0.90f;
+        pt->procs[i].mood_flow    *= 0.90f;
+        pt->procs[i].mood_warmth  *= 0.90f;
     }
 
     /* time-slice preemption reset (the tick's housekeeping stays) */
@@ -1249,6 +1283,13 @@ static int proc_tick(ProcessTable *pt) {
             p->cpu_time++;
             p->slice_used++;
             K.current_pid = p->pid;
+            /* being served spends the argument: a monad that gets the CPU discharges its
+             * mood toward calm. Without this a tense monad wins every round forever and
+             * starves the rest — the field would not bend the scheduler, it would jam it. */
+            p->mood_pain    *= 0.85f;
+            p->mood_tension *= 0.85f;
+            p->mood_flow    *= 0.85f;
+            p->mood_warmth  *= 0.85f;
 
             /* if just exhausted, reset for next */
             if (p->slice_used >= p->max_slice) {
@@ -1994,6 +2035,10 @@ static int cmd_fork(char *out, int sz, int argc, char **argv) {
             K.procs.procs[i].max_slice = p->max_slice;
             K.procs.procs[i].cpu_limit = p->cpu_limit;
             K.procs.procs[i].numbness = p->numbness;
+            K.procs.procs[i].mood_pain    = p->mood_pain;    /* a child inherits the mood */
+            K.procs.procs[i].mood_tension = p->mood_tension;
+            K.procs.procs[i].mood_flow    = p->mood_flow;
+            K.procs.procs[i].mood_warmth  = p->mood_warmth;
             K.procs.procs[i].signals = 0; /* child starts clean */
             K.procs.procs[i].cpu_time = 0;
             K.procs.procs[i].cpu_violations = 0;
@@ -2316,6 +2361,30 @@ static int cmd_feel(char *out, int sz, int argc, char **argv) {
     }
     snprintf(out, sz, "no such pid");
     return ERR_INVALID;
+}
+
+/* The monad's own weather. `mood <pid>` reads it; `mood <pid> <dim> <value>` sets one
+ * dimension. The scheduler weighs it by the shared emergence, so a monad only argues as
+ * loudly as the system's weather permits. */
+static int cmd_mood(char *out, int sz, int argc, char **argv) {
+    if (argc < 2) { snprintf(out, sz, "Usage: mood <pid> [pain|tension|flow|warmth <value>]"); return ERR_INVALID; }
+    int pid = atoi(argv[1]);
+    Process *p = NULL;
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { p = &K.procs.procs[i]; break; }
+    if (!p) { snprintf(out, sz, "no such pid"); return ERR_INVALID; }
+
+    if (argc >= 4) {
+        float v = (float)atof(argv[3]);
+        if      (strcmp(argv[2], "pain")    == 0) p->mood_pain    = v;
+        else if (strcmp(argv[2], "tension") == 0) p->mood_tension = v;
+        else if (strcmp(argv[2], "flow")    == 0) p->mood_flow    = v;
+        else if (strcmp(argv[2], "warmth")  == 0) p->mood_warmth  = v;
+        else { snprintf(out, sz, "mood: unknown dimension '%s' (pain|tension|flow|warmth)", argv[2]); return ERR_INVALID; }
+    }
+    snprintf(out, sz, "pid %d mood: pain %.3f tension %.3f flow %.3f warmth %.3f",
+             pid, p->mood_pain, p->mood_tension, p->mood_flow, p->mood_warmth);
+    return ERR_OK;
 }
 
 static int cmd_pause(char *out, int sz, int argc, char **argv) {
@@ -3565,6 +3634,42 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         K.procs.procs[ki].used = 0;
     }
 
+    /* The monad's own weather bends the scheduler — and an empty mood does not */
+    {
+        /* the mood is weighed by the shared emergence, so the check must own that
+         * precondition — otherwise it silently measures whatever weather `.soma` restored
+         * (it flapped exactly that way: PASS with a persisted field, FAIL from a cold boot) */
+        AM_State mood_snapshot = *am_get_state();
+        am_get_state()->emergence = 0.8f;
+        int m1 = proc_spawn(&K.procs, "mood_tense", 0);
+        int m2 = proc_spawn(&K.procs, "mood_calm", 0);
+        int i1 = -1, i2 = -1;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == m1) i1 = i;
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == m2) i2 = i;
+        }
+        K.procs.procs[i1].mood_tension = 0.9f;
+        K.procs.procs[i2].mood_warmth  = 0.9f;
+        for (int t = 0; t < 12; t++) proc_tick(&K.procs);
+        int tense_cpu = K.procs.procs[i1].cpu_time, calm_cpu = K.procs.procs[i2].cpu_time;
+        K.procs.procs[i1].used = 0; K.procs.procs[i2].used = 0;
+
+        /* same cohort, no moods: the scheduler must fall back to round-robin exactly */
+        int c1 = proc_spawn(&K.procs, "mood_ctl_a", 0);
+        int c2 = proc_spawn(&K.procs, "mood_ctl_b", 0);
+        int j1 = -1, j2 = -1;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == c1) j1 = i;
+            if (K.procs.procs[i].used && K.procs.procs[i].pid == c2) j2 = i;
+        }
+        for (int t = 0; t < 12; t++) proc_tick(&K.procs);
+        int ctl_gap = K.procs.procs[j1].cpu_time - K.procs.procs[j2].cpu_time;
+        K.procs.procs[j1].used = 0; K.procs.procs[j2].used = 0;
+
+        *am_get_state() = mood_snapshot; /* restore: the live field is exactly as before */
+        CHECK("mood_bends_scheduler", tense_cpu > calm_cpu && ctl_gap == 0);
+    }
+
     /* An AML program is a monad: it runs, moves the field, is charged, and dies a zombie */
     {
         const char *apath = "/tmp/amos_selftest.aml";
@@ -4045,7 +4150,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"numb", cmd_numb}, {"feel", cmd_feel}, {"pause", cmd_pause}, {"send", cmd_send},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"numb", cmd_numb}, {"feel", cmd_feel}, {"mood", cmd_mood}, {"pause", cmd_pause}, {"send", cmd_send},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},

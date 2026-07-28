@@ -5,7 +5,7 @@
 amosOZ is a single-file OS environment in three forms: C, HTML/JS, Python. Not **Treaty-compatible** with Unix userland semantics.
 
 **Canonical:** `amosoz.c` **v0.4.x** — reference implementation (llm.c-grade for OS).  
-**Parity:** `reffs/amosoz.py` + `reffs/amosoz.html` **v0.4.x** — triple parity (the C selftest is 57/57; the reference forms predate the field and numbness). Reference forms; C is canonical.
+**Parity:** `reffs/amosoz.py` + `reffs/amosoz.html` **v0.4.x** — triple parity (the C selftest is 59/59; the reference forms predate the field and numbness). Reference forms; C is canonical.
 
 Dedicated to **Amos Oz** (עוז). 
 
@@ -21,7 +21,7 @@ runs as a monad — spawned, charged, reaped. C is the center.
 make && make test-all && ./amosoz
 ```
 
-- `make test` — C selftest (57/57)  
+- `make test` — C selftest (59/59)  
 - `make test-py` — Python parity  
 - `make test-html` — headless HTML/JS parity  
 - `make test-parity` — all three in one shot  
@@ -58,7 +58,7 @@ Core OS primitives (AMOS body):
 | Shell / IPC | `echo`, `env`, `set`, `unset`, `export`, `source`, `history`, `which`, `exec`, `test`, `send` (mailbox IPC) |
 | Logic / Syscall | `true`, `false`, `syscall` |
 | OZ / Meta | `oz`, `slots`, `modules`, `overhead`, `hooks`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
-| Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program runs as a monad) |
+| Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program runs as a monad), `mood <pid> [dim value]` (the monad's own weather — pain/tension/flow/warmth — weighed by the shared emergence) |
 | Persist | `save`, `load` |
 
 New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership (no global fallback), current_pid + shell_pid for all context/parent/prompt/cwd, signals with numbness, blocking, fork (clones fds/cwd/limits/numbness/owned + resets child), exec (reset signals/numbness/slice/violations), unified devices, ring ledger, rich /proc + per-pid files, scheduler guarantee (never none).
@@ -81,7 +81,7 @@ New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership 
 
 Purpose: single-file, self-contained, llm.c-grade minimal OS. C is the center. Everything verifiable in one file. Go/goroutines layer comes *around* it later.
 
-## Selftest (57/57)
+## Selftest (59/59)
 
 ```
 make test
@@ -113,9 +113,12 @@ The point is the **single C file** as the complete, self-contained algorithm. Py
 **Resonance — done, not pending:** AML field hosted and evolving, scheduler dissolved into it,
 `.soma` persistence, `resonate` as a shell handle, `.aml` programs running as monads.
 
+Each monad also carries its own thin slice of that weather (`mood`: pain / tension / flow /
+warmth). Its own agitation argues for the CPU, its own flow yields; the shared emergence sets
+how loudly anyone may argue. A mood fades each tick and discharges when served, so it bends the
+scheduler without jamming it — and an empty mood reduces the scheduler to round-robin exactly.
+
 **Next:**
-- Per-monad field slice: the shared field stays the system weather, each monad gets a thin slice
-  its own AML program perturbs and the scheduler reads as "weather × own state".
 - Budgeted `.aml` execution — a monad currently consumes its quantum whole. Real time-slicing
   needs an `am_exec_step` / `am_resume` API the AML canon does not have yet.
 - Go layer with goroutines *around* the C kernel. Threads stay outside the kernel while the AML

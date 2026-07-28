@@ -6,7 +6,6 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 ## Roadmap (open — not yet done)
 
 - **`.aml` budgeted execution.** A monad currently consumes its quantum whole (D1). Real time-slicing needs an `am_exec_step` / `am_resume` API the canon does not have; that is upstream work on `ariannamethod.ai`, on its own branch, by the maintainer's word.
-- **Per-monad field slice (D2).** Shared field stays the system weather; each monad gets a thin slice (pain / tension / flow / warmth / velocity) that its own AML program perturbs and `proc_field_select` reads as "weather x own state".
 - **Resonant renaming.** Move internal function/command names toward the resonant register of
   SARTRE (schumann / overlay / tongue / namespace / prophecy) and AML (destiny / prophecy /
   pain / wormhole / scar), as amosOZ grows its SARTRE-compatible resonance core. The Unix-treaty
@@ -14,6 +13,52 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
   internals take the resonant names. This cascades into the command table and touches the treaty
   identity — do it deliberately in one pass, not casually. (Side effect: relaxes vocabulary-based
   classifier pressure on routine OS-code.)
+
+---
+
+## 2026-07-28 — Brick D2: the monad's own weather bends the scheduler
+
+The field was one weather for the whole system: a monad could push the barometer but had no
+state of its own, so two monads with opposite dynamics simply overwrote each other. D2 gives
+each monad a thin slice — `mood_pain / mood_tension / mood_flow / mood_warmth` — and lets the
+scheduler hear it. Velocity is deliberately **not** in the slice: tempo belongs to the system,
+not to one monad.
+
+- **The argument.** `proc_field_select` adds `w_chamber * ((tension+pain) - (flow+warmth)) * 50`
+  per proc: a monad's own agitation demands the CPU, its own flow/warmth is content to yield.
+  The weight is the shared emergence — the weather decides how loudly anyone may argue. An
+  empty mood contributes exactly 0, so a calm system reduces to the previous scheduling bit
+  for bit. The pre-existing shared-field chamber term is untouched.
+- **`mood <pid>`** reads the slice, `mood <pid> <pain|tension|flow|warmth> <value>` sets one
+  dimension. `fork` clones the mood — a child inherits it.
+- **An AML monad records its own delta.** What `run x.aml` moves in the shared field is also
+  what that monad now carries: `pulse.aml` (PAIN 0.2 / TENSION 0.4) leaves `mood 3` reading
+  `pain 0.200 tension 0.400`. The weather keeps the change; the monad keeps its share.
+- **Two anti-jam rules, both found by the gate, not by reading.** First cut: a tense monad won
+  every round forever and its rival got *exactly 0* CPU — so a served monad now discharges its
+  mood (×0.85). That alone did not fix it, because the discharge only reaches whoever is being
+  served: the rival's contentment never decayed and kept it out permanently. So a mood now also
+  fades for every monad each tick (×0.90) — it is passing weather, not a caste.
+
+### Verification
+- Measured, 3 cohorts: with `tension 0.9` vs `warmth 0.9` over 12 ticks → **26 vs 0**; over 60
+  ticks → **82 vs 31** (loud, but no starvation); with no moods over 12 ticks → **6 vs 6**, the
+  round-robin exactly as before the slice existed.
+- Selftest **58 → 59**, 0 FAIL. `mood_bends_scheduler` asserts both halves: divergence with
+  moods *and* a zero gap without them.
+- **The check flapped and was fixed, not accepted.** It passed with a persisted `.soma` and
+  failed from a cold boot, because the mood is weighed by emergence and `am_step` has not run
+  during the first command. It now sets its own emergence and restores the field: 5 cold runs
+  give an identical 59/59 list, and a warm run matches them.
+- Same class in the shell suite: `amos.soma` leaked between cases, so the `.aml` case perturbed
+  the field and bent scheduling in a later case (the control read 13 vs 0 instead of 6 vs 6).
+  `run()` now clears the field per case — the suite passes twice in a row, order-independent.
+- `make` 0 errors; shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0** errors on
+  the selftest and the mood/tick/fork paths.
+- Noted, not touched (pre-existing): `/proc/<pid>/status` is one command behind, because
+  `fs_read_to_buf` refreshes only after *finding* the node (`amosoz.c:530`), and the node is
+  created by the previous refresh. A just-spawned proc is therefore invisible in `/proc`;
+  `mood <pid>` is the observable for a monad that dies inside its own command.
 
 ---
 
