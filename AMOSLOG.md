@@ -16,6 +16,55 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-01 — Brick D3: a monad's life is its program, not one command
+
+D1 gave amosOZ an AML citizen that ran to completion inside the command that spawned it — a
+citizen with a lifespan of one prompt. The canon now has resumable execution
+(`am_program_open` / `step` / `close`, `ariannamethod.ai` `ed7347e`), re-vendored here, so a
+monad is opened and left **ready**: the scheduler hands it a quantum like any other proc and it
+runs `max_slice` statements of its own program per turn. `slice <pid> N` therefore tunes how
+finely a monad is sliced — an existing knob, no new one.
+
+- Each slice charges `cpu_time` by the statements actually consumed (`am_program_remaining`
+  before/after), and folds what the program moved in the shared field into the monad's own
+  mood. A program that keeps perturbing keeps its argument alive against the per-tick fade —
+  this is what D2's slice was built for and could not previously be fed.
+- `proc_release_aml` closes the program wherever a slot is freed (parent `wait`, init reap).
+  A monad killed mid-program becomes a zombie holding its program until it is collected.
+- Programs are read into a 64 KB buffer; larger is refused with a clear message rather than
+  silently truncated.
+
+**Foundation change, stated loudly rather than slipped in: init now reaps only orphans.**
+`proc_tick` freed *every* zombie whenever init was scheduled, so a parent's `wait` was racing
+init for its own child's exit code — D1 papered over this by suppressing one auto-tick, which
+stops working once the monad dies inside a later tick instead of inside its own command. A
+zombie whose parent is still alive now waits for that parent (`proc_is_orphan`); `ppid <= 1` or
+a vanished parent still goes to init. This is the correct Unix rule and it makes `wait`
+meaningful for real children too, not just for monads.
+
+### Verification
+- **Slicing is real, measured on the field:** `run runtime/pulse.aml` with `slice 3 1` leaves the
+  monad `ready` after its first quantum with `dissonance 0.699 tension 0.399 pain 0.000` — the
+  third directive has not run yet; `pain 0.200` arrives on the next quantum. A partial field is
+  the proof that the program is genuinely cut into slices rather than deferred whole.
+- `wait` → `reaped PID 3 status 0`, the parent collecting its own monad.
+- Selftest **59 → 60**, 0 FAIL. `aml_monad_runs` is replaced by two stricter checks:
+  `aml_monad_opens_alive` (opened, holding a program, field *not yet moved*) and
+  `aml_monad_finishes` (runs across ticks at `max_slice 1`, ends a zombie with rc 0, field moved).
+- Two existing cases were updated deliberately, and both got **stronger**, not looser:
+  the numbness case now asserts the delivered victim is `zombie` (absence would also be satisfied
+  by a monad that never ran); the mood case asserts both moved dimensions are non-zero after the
+  program has run, because the exact value now legitimately depends on scheduling — measured
+  `pain 0.162 tension 0.324` at `max_slice 5` and `pain 0.180 tension 0.248` at `max_slice 1`.
+- `make` 0 errors; shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0** errors on
+  the selftest and on the run-aml / slice / mid-program kill / wait / missing-file paths. Leak
+  detection is unsupported on this host, so leaks are not claimed clean by tool; every open is
+  paired with a close through `proc_release_aml`.
+- README not touched in this commit: it is being rewritten in parallel. Its `.aml` section still
+  describes the D1 promise (a monad that completes inside its command) and needs the D3 text.
+
+---
+
 ## 2026-07-28 — Brick D2: the monad's own weather bends the scheduler
 
 The field was one weather for the whole system: a monad could push the barometer but had no

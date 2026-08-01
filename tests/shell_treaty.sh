@@ -47,7 +47,10 @@ out=$(run 'run victim' 'numb 3 15' 'signal 3 18' 'tick' 'signal 3 15' 'tick' 'ti
 echo "$out" | grep -qE '^3[[:space:]]+victim' || { echo "FAIL: numbness did not outlive an unrelated delivery"; exit 1; }
 
 out=$(run 'run victim' 'numb 3 15' 'signal 3 15' 'tick' 'feel 3 15' 'tick' 'ps')
-if echo "$out" | grep -qE '^3[[:space:]]+victim'; then echo "FAIL: feel did not deliver the pending signal"; exit 1; fi
+# delivery is now observed directly: init reaps only orphans, so a collected zombie stays
+# visible for its parent. Asserting "zombie" is stronger than asserting the row is absent —
+# an absent row would also be satisfied by a monad that never ran at all.
+echo "$out" | grep -qE '^3[[:space:]]+victim[[:space:]]+zombie' || { echo "FAIL: feel did not deliver the pending signal"; exit 1; }
 
 out=$(run 'run victim' 'numb 3 9')
 echo "$out" | grep -q 'pierces numbness' || { echo "FAIL: KILL is maskable"; exit 1; }
@@ -60,8 +63,12 @@ if echo "$out" | grep -q 'dissonance 0.000'; then echo "FAIL: AML monad did not 
 out=$(run 'run pulse' 'field')
 echo "$out" | grep -q 'AML monad' || { echo "FAIL: manifest slot of kind aml did not run"; exit 1; }
 
-out=$(run "run $ROOT/runtime/pulse.aml" 'mood 3')
-echo "$out" | grep -q 'tension 0.400' || { echo "FAIL: AML monad did not record its delta as mood"; exit 1; }
+# the monad now runs across quanta and its mood accumulates per slice while the per-tick fade
+# works against it, so the exact value legitimately depends on scheduling. Assert what does not:
+# both dimensions the program moved are non-zero once it has run.
+out=$(run "run $ROOT/runtime/pulse.aml" 'tick' 'tick' 'mood 3')
+echo "$out" | grep -q 'pid 3 mood' || { echo "FAIL: AML monad has no mood"; exit 1; }
+if echo "$out" | grep -qE 'pain 0\.000|tension 0\.000'; then echo "FAIL: AML monad did not record its delta as mood"; exit 1; fi
 
 out=$(run 'run /nonexistent/nope.aml' 'ps')
 echo "$out" | grep -q 'cannot read AML program' || { echo "FAIL: missing .aml not refused"; exit 1; }
