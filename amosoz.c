@@ -157,6 +157,7 @@ typedef struct {
      * was before the slice existed. Velocity is deliberately absent: tempo belongs to the
      * system, not to one monad. */
     float mood_pain, mood_tension, mood_flow, mood_warmth;
+    void *aml_prog;    /* open AML program when this monad's life IS a program; NULL otherwise */
     int   spawned;     /* 1 = backed by a real OS process (fork+exec); 0 = virtual monad (SARTRE ns contract) */
     pid_t real_pid;    /* real OS pid when spawned; 0 otherwise */
 } Process;
@@ -869,6 +870,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
             pt->procs[i].mailbox[0] = '\0';
             pt->procs[i].mood_pain = pt->procs[i].mood_tension = 0.0f;
             pt->procs[i].mood_flow = pt->procs[i].mood_warmth = 0.0f;
+            pt->procs[i].aml_prog = NULL;
             pt->procs[i].spawned = 0;
             pt->procs[i].real_pid = 0;
             return pt->procs[i].pid;
@@ -953,6 +955,39 @@ static int is_aml_target(const char *name) {
     return len > 4 && strcmp(name + len - 4, ".aml") == 0;
 }
 
+/* Close a monad's program if it still holds one. Every path that frees a process slot must
+ * go through here, or the open AML program leaks with the slot. */
+static void proc_release_aml(Process *p) {
+    if (p->aml_prog) { am_program_close(p->aml_prog); p->aml_prog = NULL; }
+}
+
+/* One quantum of a living monad: it runs up to max_slice statements of its own program,
+ * pays for what it actually ran, and folds what it moved in the shared field into its own
+ * mood — so a program that keeps perturbing keeps its argument alive against the decay.
+ * When the program ends the monad becomes a zombie carrying its result. */
+static void proc_aml_slice(Process *p) {
+    AM_State *fs = am_get_state();
+    float b_pain = fs->pain, b_tension = fs->tension, b_flow = fs->flow, b_warmth = fs->warmth;
+
+    int before = am_program_remaining(p->aml_prog);
+    int done = am_program_step(p->aml_prog, p->max_slice > 0 ? p->max_slice : 1);
+    int consumed = before - am_program_remaining(p->aml_prog);
+
+    p->cpu_time += consumed;
+    p->mood_pain    += fs->pain    - b_pain;
+    p->mood_tension += fs->tension - b_tension;
+    p->mood_flow    += fs->flow    - b_flow;
+    p->mood_warmth  += fs->warmth  - b_warmth;
+
+    if (done) {
+        p->exit_code = am_program_close(p->aml_prog);
+        p->aml_prog = NULL;
+        strcpy(p->state, "zombie");
+    }
+}
+
+#define MAX_AML_PROGRAM 65536
+
 static int proc_aml_spawn(const char *path, const char *label, char *out, int sz) {
     int lines = aml_program_lines(path);
     if (lines < 0) { snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
@@ -965,31 +1000,43 @@ static int proc_aml_spawn(const char *path, const char *label, char *out, int sz
     for (int i = 0; i < MAX_PROCS; i++)
         if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { idx = i; break; }
 
-    strcpy(K.procs.procs[idx].state, "running");
-    /* what the program moves in the shared weather is also what this monad now carries:
-     * the delta is its mood. The weather keeps the change; the monad keeps its share. */
-    AM_State *fs = am_get_state();
-    float b_pain = fs->pain, b_tension = fs->tension, b_flow = fs->flow, b_warmth = fs->warmth;
-    int rc = am_exec_file(path);
-    K.procs.procs[idx].mood_pain    = fs->pain    - b_pain;
-    K.procs.procs[idx].mood_tension = fs->tension - b_tension;
-    K.procs.procs[idx].mood_flow    = fs->flow    - b_flow;
-    K.procs.procs[idx].mood_warmth  = fs->warmth  - b_warmth;
-    K.procs.procs[idx].cpu_time += lines;   /* a line of AML is a unit of work */
-    K.procs.procs[idx].ticks    += 1;
-    K.procs.procs[idx].exit_code = rc;
-    strcpy(K.procs.procs[idx].state, "zombie");
-    /* the monad died inside this command; hold the auto-tick so its parent — not init —
-     * gets the chance to collect it, the way `fg` holds context */
-    K.suppress_next_auto_tick = 1;
+    /* The monad does not run here. It is opened and left ready: the scheduler gives it a
+     * quantum like any other proc, and it runs max_slice statements of its own program per
+     * turn. A monad's life is now as long as its program, not as long as one command. */
+    char src[MAX_AML_PROGRAM];
+    FILE *f = fopen(path, "r");
+    if (!f) { K.procs.procs[idx].used = 0; snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
+    size_t n = fread(src, 1, sizeof(src) - 1, f);
+    int too_big = !feof(f);
+    fclose(f);
+    src[n] = '\0';
+    if (too_big) {
+        K.procs.procs[idx].used = 0;
+        snprintf(out, sz, "run: AML program '%s' exceeds %d bytes", path, MAX_AML_PROGRAM);
+        return ERR_INVALID;
+    }
 
-    if (rc != 0)
-        snprintf(out, sz, "AML monad '%s' pid %d failed: %s (cpu charged %d)",
-                 label, pid, am_get_error(), lines);
-    else
-        snprintf(out, sz, "AML monad '%s' pid %d ran %d lines, rc 0 (cpu charged %d)",
-                 label, pid, lines, lines);
-    return rc == 0 ? ERR_OK : ERR_IO;
+    K.procs.procs[idx].aml_prog = am_program_open(src);
+    if (!K.procs.procs[idx].aml_prog) {
+        K.procs.procs[idx].used = 0;
+        snprintf(out, sz, "run: '%s' opened no program (empty or out of memory)", path);
+        return ERR_INVALID;
+    }
+    strcpy(K.procs.procs[idx].state, "ready");
+    snprintf(out, sz, "AML monad '%s' pid %d opened, %d statements, %d per quantum",
+             label, pid, am_program_remaining(K.procs.procs[idx].aml_prog),
+             K.procs.procs[idx].max_slice);
+    return ERR_OK;
+}
+
+/* init reaps orphans, not everyone. A zombie whose parent is still alive belongs to that
+ * parent's `wait` — reaping it here is what made a collected exit code a race. */
+static int proc_is_orphan(ProcessTable *pt, int idx) {
+    int ppid = pt->procs[idx].ppid;
+    if (ppid <= 1) return 1;
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (pt->procs[i].used && pt->procs[i].pid == ppid) return 0;
+    return 1;
 }
 
 static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
@@ -1021,6 +1068,7 @@ static int proc_wait(ProcessTable *pt, int parent_pid, int *status_out) {
             strcmp(pt->procs[i].state, "zombie") == 0) {
             *status_out = pt->procs[i].exit_code;
             int child_pid = pt->procs[i].pid;
+            proc_release_aml(&pt->procs[i]);
             pt->procs[i].used = 0; /* reap */
             return child_pid;
         }
@@ -1259,7 +1307,8 @@ static int proc_tick(ProcessTable *pt) {
         /* init reaps zombies automatically (minimal OS) */
         if (pt->procs[best_idx].pid == 1) {
             for (int z = 0; z < n; z++) {
-                if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0) {
+                if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0 && proc_is_orphan(pt, z)) {
+                    proc_release_aml(&pt->procs[z]);
                     pt->procs[z].used = 0;
                 }
             }
@@ -1291,8 +1340,11 @@ static int proc_tick(ProcessTable *pt) {
             p->mood_flow    *= 0.85f;
             p->mood_warmth  *= 0.85f;
 
-            /* if just exhausted, reset for next */
-            if (p->slice_used >= p->max_slice) {
+            /* an AML monad spends its quantum running its own program */
+            if (p->aml_prog) proc_aml_slice(p);
+
+            /* if just exhausted, reset for next (a monad that died in its slice stays dead) */
+            if (p->slice_used >= p->max_slice && strcmp(p->state, "running") == 0) {
                 p->slice_used = 0;
                 strcpy(p->state, "ready");
             }
@@ -1326,7 +1378,7 @@ static int proc_tick(ProcessTable *pt) {
             p->cpu_time++;
             K.current_pid = p->pid;
             if (p->pid == 1) {
-                for (int z = 0; z < n; z++) if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0) pt->procs[z].used = 0;
+                for (int z = 0; z < n; z++) if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0 && proc_is_orphan(pt, z)) { proc_release_aml(&pt->procs[z]); pt->procs[z].used = 0; }
             }
         }
     }
@@ -3681,11 +3733,20 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         int ai = -1;
         for (int i = 0; i < MAX_PROCS; i++)
             if (K.procs.procs[i].used && strcmp(K.procs.procs[i].name, "selftest_monad") == 0) ai = i;
-        CHECK("aml_monad_runs", af != NULL && arc == ERR_OK && ai >= 0
-            && am_get_state()->dissonance > 0.5f
-            && K.procs.procs[ai].cpu_time == 1
-            && strcmp(K.procs.procs[ai].state, "zombie") == 0);
-        if (ai >= 0) K.procs.procs[ai].used = 0;
+        /* the monad is opened alive, not run to completion: its life is its program */
+        CHECK("aml_monad_opens_alive", af != NULL && arc == ERR_OK && ai >= 0
+            && K.procs.procs[ai].aml_prog != NULL
+            && strcmp(K.procs.procs[ai].state, "zombie") != 0
+            && am_get_state()->dissonance == field_snapshot.dissonance);
+        /* and it runs across quanta until its program ends */
+        K.procs.procs[ai].max_slice = 1;
+        for (int t = 0; t < 40 && K.procs.procs[ai].aml_prog; t++) proc_tick(&K.procs);
+        CHECK("aml_monad_finishes", ai >= 0 && K.procs.procs[ai].aml_prog == NULL
+            && strcmp(K.procs.procs[ai].state, "zombie") == 0
+            && K.procs.procs[ai].exit_code == 0
+            && K.procs.procs[ai].cpu_time > 0
+            && am_get_state()->dissonance > 0.5f);
+        if (ai >= 0) { proc_release_aml(&K.procs.procs[ai]); K.procs.procs[ai].used = 0; }
         *am_get_state() = field_snapshot; /* restore: the live field is exactly as before */
         remove(apath);
     }
