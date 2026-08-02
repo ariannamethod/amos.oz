@@ -1,19 +1,17 @@
 # amos.oz — Arianna Method Operating System
 
-**The most atomic way to build a working OS-like environment from scratch.**
+amosOZ is a single-file operating system: canonical in C (`amosoz.c`, v0.4.0), with parity forms in Python and HTML/JS under `reffs/`. `amosoz.c` is llm.c-grade for an OS — the whole algorithm in one file, nothing hidden behind a build graph. C selftest: 60/60 (`make test`). The reference forms track the AMOS body, not the resonance field yet — they were built before the field and numbness existed.
 
-amosOZ is a single-file OS environment in three forms: C, HTML/JS, Python. Not **Treaty-compatible** with Unix userland semantics.
+Its shell treaty is its own contract, not POSIX. POSIX supplies the vocabulary; the semantics below are amosOZ's.
 
-**Canonical:** `amosoz.c` **v0.4.x** — reference implementation (llm.c-grade for OS).  
-**Parity:** `reffs/amosoz.py` + `reffs/amosoz.html` **v0.4.x** — triple parity (the C selftest is 59/59; the reference forms predate the field and numbness). Reference forms; C is canonical.
+Dedicated to **Amos Oz** (עוז).
 
-Dedicated to **Amos Oz** (עוז). 
+The **AMOS body** is per-process isolation, a preemptive scheduler, devices, `/proc`, fork/exec/wait, and mailbox IPC — the concrete OS. Field-by-field detail is in Architecture below.
 
-This is the **AMOS body** (foundation): per-process isolation (cwd, open_fds[32], owned memory blocks + limits, cpu_time/limit/violations, signals + numbness, priority, max_slice, mailbox), scheduler (priority + slice preemption + hard cpu limits + no-'none' guarantee), current_pid + shell_pid context, signals, devices, rich /proc, fork (full clone)/exec (replace+reset), wait, blocking, IPC via mailbox/send.
-
-The AML resonance field is **hosted, not planned**: it boots with the kernel, advances one step
-per command, and the scheduler reads it to choose among equal-priority procs. An `.aml` program
-runs as a monad — spawned, charged, reaped. C is the center.
+The **AML resonance field** is hosted, not planned: it boots with the kernel, advances one step
+per command, and the scheduler reads it to choose among equal-priority monads. An `.aml` program
+is a monad — opened, scheduled a quantum at a time, charged for the statements it runs, and
+collected by its parent when its program ends. C is the center.
 
 ## Quick Start
 
@@ -21,7 +19,7 @@ runs as a monad — spawned, charged, reaped. C is the center.
 make && make test-all && ./amosoz
 ```
 
-- `make test` — C selftest (59/59)  
+- `make test` — C selftest (60/60)  
 - `make test-py` — Python parity  
 - `make test-html` — headless HTML/JS parity  
 - `make test-parity` — all three in one shot  
@@ -58,16 +56,14 @@ Core OS primitives (AMOS body):
 | Shell / IPC | `echo`, `env`, `set`, `unset`, `export`, `source`, `history`, `which`, `exec`, `test`, `send` (mailbox IPC) |
 | Logic / Syscall | `true`, `false`, `syscall` |
 | OZ / Meta | `oz`, `slots`, `modules`, `overhead`, `hooks`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
-| Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program runs as a monad), `mood <pid> [dim value]` (the monad's own weather — pain/tension/flow/warmth — weighed by the shared emergence) |
+| Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program becomes a monad, sliced `max_slice` statements per quantum — `slice <pid> N` tunes it), `mood <pid> [dim value]` (the monad's own weather — pain/tension/flow/warmth — weighed by the shared emergence) |
 | Persist | `save`, `load` |
-
-New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership (no global fallback), current_pid + shell_pid for all context/parent/prompt/cwd, signals with numbness, blocking, fork (clones fds/cwd/limits/numbness/owned + resets child), exec (reset signals/numbness/slice/violations), unified devices, ring ledger, rich /proc + per-pid files, scheduler guarantee (never none).
 
 ## Architecture (current foundation)
 
 **AMOS (body)** — the concrete:
 - Per-process: pid/ppid, cwd, open_fds[32], owned_blocks + mem_used/limit, cpu_time/limit/violations, signals + numbness, priority, max_slice/slice_used, mailbox[256], state (ready/running/blocked/zombie/stopped).
-- Scheduler: priority + round-robin + time-slice preemption + hard cpu limits (violation + stop) + consolidated guarantee + ultimate force (shell/init) — never "none", always sets current_pid. Init reaps zombies.
+- Scheduler: priority + round-robin + time-slice preemption + hard cpu limits (violation + stop) + consolidated guarantee + ultimate force (shell/init) — never "none", always sets current_pid. Init reaps orphans only — a zombie whose parent is alive waits for that parent's `wait`.
 - Memory: per-proc charge + hard limit enforced (strict, no global fallback).
 - FS + devices (null/zero/full/random/urandom/tty + console/mem) with per-proc fds; unified read path (cat /dev/* delivers), write specials.
 - Signals: delivery in tick, STOP/CONT/TERM/KILL + unblock on signal. **Numbness** (`numb` / `feel`) is the mask in this system's own register: a numbed signal is not lost, it stays pending until the monad feels again. Numbness is a property of the monad and outlives delivery; KILL and STOP pierce it.
@@ -77,11 +73,9 @@ New in this foundation phase: per-process fds/cwd/memory/cpu + strict ownership 
 - current_pid + shell_pid context everywhere (prompt, pwd, resolve, ownership, parent in spawn/fork/wait/exec, fg sticks via suppress).
 - Auto time advance (main) + manual `tick`; fg suppresses auto-tick.
 
-**OZ (field)** — the extension layer (modules, slots, hooks, contracts, ledger provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `proc_field_select` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
+**OZ (field)** — the extension layer (modules, slots, hooks, contracts, ledger provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `monad_choose` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
 
-Purpose: single-file, self-contained, llm.c-grade minimal OS. C is the center. Everything verifiable in one file. Go/goroutines layer comes *around* it later.
-
-## Selftest (59/59)
+## Selftest (60/60)
 
 ```
 make test
@@ -96,7 +90,7 @@ Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), sched
 | `amosoz.c` | **canonical reference** (foundation complete) |
 | `reffs/amosoz.py` + `reffs/amosoz.html` | parity maintained (reference forms) |
 
-The point is the **single C file** as the complete, self-contained algorithm. Py/HTML are for comparison only.
+`reffs/` tracks `amosoz.c` for comparison. Where they diverge, `amosoz.c` is right.
 
 ## Current State & Roadmap
 
@@ -110,7 +104,7 @@ The point is the **single C file** as the complete, self-contained algorithm. Py
 - Current context everywhere: current_pid + shell_pid for ownership/parent/prompt/cwd in all paths; strict no-fallback mem.
 - All in **one self-contained C file**.
 
-**Resonance — done, not pending:** AML field hosted and evolving, scheduler dissolved into it,
+**Resonance:** AML field hosted and evolving, scheduler dissolved into it,
 `.soma` persistence, `resonate` as a shell handle, `.aml` programs running as monads.
 
 Each monad also carries its own thin slice of that weather (`mood`: pain / tension / flow /
@@ -118,18 +112,23 @@ warmth). Its own agitation argues for the CPU, its own flow yields; the shared e
 how loudly anyone may argue. A mood fades each tick and discharges when served, so it bends the
 scheduler without jamming it — and an empty mood reduces the scheduler to round-robin exactly.
 
+An `.aml` monad is time-sliced: the canon gained resumable execution
+(`am_program_open` / `step` / `close`), so a monad runs `max_slice` statements per quantum and
+lives as long as its program rather than as long as one command. It is charged for the statements
+it actually runs, and what it moves in the shared field accumulates into its own mood.
+
 **Next:**
-- Budgeted `.aml` execution — a monad currently consumes its quantum whole. Real time-slicing
-  needs an `am_exec_step` / `am_resume` API the AML canon does not have yet.
+- Suspending *inside* a loop. A `while` still runs all of its iterations within one step, because
+  the block state lives on the C stack — lifting it into the program handle is canon work.
 - Go layer with goroutines *around* the C kernel. Threads stay outside the kernel while the AML
   field is an unlocked singleton — a threaded monad would race the main loop's `am_step`.
 
 ## Design Principles
 
-> "Compatibility is a treaty, not obedience."  
-> "Every command leaves a trace." (now ring-buffered, last 256)  
-> "OZ begins where extension becomes accountable."  
-> C is the center. Foundation first.
+> amosOZ's shell treaty sets its own rules; POSIX supplies the vocabulary, not the compliance target.  
+> Every command leaves a trace — ring-buffered, last 256.  
+> OZ begins where an extension has to prove itself: modules, hooks, contracts, ledger provenance.  
+> Foundation first.
 
 ## License
 
