@@ -15,6 +15,43 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-02 — The selftest told the truth only at boot; now it holds in a live system
+
+The two defects named in the previous entry and deliberately left there are fixed, because a
+diagnostic that reports 60/60 on a cold boot and 58/60 in a running system is a diagnostic you
+cannot use to check a running system.
+
+- **`slice_preempt`** spawned a monad with `max_slice 2` and expected preemption after two ticks.
+  In a busy system that monad may be served only once, so the slice never exhausts and the check
+  fails on the luck of scheduling. It now runs its probe at `priority 9`, the same isolation the
+  mood cohort uses: preemption is measured on the monad under test.
+- **`current_has_state`** matched `pid == curp` **without checking `used`**. A freed slot keeps
+  its old pid, so a stale slot answered the match and the check failed on a dead monad. Worse,
+  the `CHECK` sat *inside* the loop — it ran once per match, so a live system with several stale
+  slots moved the reported test total itself.
+
+Fixing the match then exposed something worth stating: the block above frees a slot by hand
+without a tick, so if that monad was current, `current_pid` names a freed slot until the
+scheduler runs again. **The kernel is not at fault** — verified directly: after `wait` reaps a
+running monad, `current` names init, because the tick's never-none guarantee re-establishes it.
+The check is now taken after a tick, where the kernel actually holds the invariant.
+
+- **`cmd_tick` reported `running=idle`** whenever the served monad exhausted its slice in the
+  same tick and was set back to ready. It scanned for state `"running"`; it now names the monad
+  at `K.current_pid`, which the kernel guarantees. The scheduler had always chosen — the display
+  could not see it.
+
+### Verification
+- **60/60, 0 FAIL in all three contexts**: cold boot, a warm `.soma`, and `selftest` invoked
+  mid-session inside the running 41-command scenario. The total is now the same number in every
+  context, which it was not before.
+- Baseline re-frozen at md5 `6585db04d1ee197ddeeafaeb2a7e1bc7`, reproducible across three cold
+  runs; 16 lines differ from the previous baseline — the selftest line, the two former failures,
+  and the tick lines that no longer say `idle`.
+- `make` 0 errors; shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0** errors.
+
+---
+
 ## 2026-08-02 — `mood_bends_scheduler` owned one input and thought that was determinism
 
 Found by running the frozen rename scenario against the merged tree: the check passed on a cold

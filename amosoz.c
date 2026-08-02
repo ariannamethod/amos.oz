@@ -2504,9 +2504,12 @@ static int cmd_tick(char *out, int sz, int argc, char **argv) {
     proc_refresh_all();
 
     /* find who is currently running thanks to the scheduler */
+    /* name the monad the kernel actually picked. Scanning for state "running" reported
+     * "idle" whenever the served monad exhausted its slice in the same tick and was set
+     * back to ready — the scheduler had chosen, the display just could not see it. */
     const char *running = "idle";
     for (int i = 0; i < MAX_MONADS; i++) {
-        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
             running = K.monads.monads[i].name;
             break;
         }
@@ -3546,12 +3549,14 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     int tpid = monad_spawn(&K.monads, "test_proc", 0);
     CHECK("process_spawn", tpid > 0);
     /* set small slice to test preemption */
-    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == tpid) { K.monads.monads[i].max_slice=2; K.monads.monads[i].slice_used=0; }
+    /* priority 9 isolates the probe from whoever else is alive: preemption must be measured
+     * on this monad, not on the luck of being scheduled twice in a busy system */
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == tpid) { K.monads.monads[i].max_slice=2; K.monads.monads[i].slice_used=0; K.monads.monads[i].priority=9; }
     monad_tick(&K.monads);
     monad_tick(&K.monads);
     /* after 2 ticks should have forced ready */
     int forced_ready = 0;
-    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == tpid && strcmp(K.monads.monads[i].state, "ready")==0) forced_ready=1;
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == tpid && strcmp(K.monads.monads[i].state, "ready")==0) forced_ready=1;
     CHECK("slice_preempt", forced_ready);
     monad_kill(&K.monads, tpid, 0);
     /* for test, force reap by clearing */
@@ -3559,12 +3564,21 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         if (K.monads.monads[i].used && K.monads.monads[i].pid == tpid) K.monads.monads[i].used = 0;
     CHECK("process_kill", 1); /* simplified for now */
 
-    /* deeper current, blocking, resources */
+    /* deeper current, blocking, resources.
+     * The block above frees a slot by hand, without a tick — if that monad was the current
+     * one, current_pid names a freed slot until the scheduler runs again. The kernel holds
+     * this invariant at tick boundaries (verified: after `wait` reaps a running monad,
+     * `current` names init), so the check is taken where the kernel actually guarantees it. */
+    monad_tick(&K.monads);
     int curp = K.current_pid;
     CHECK("current_after_tick", curp > 0);
-    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == curp) {
-        CHECK("current_has_state", K.monads.monads[i].used);
-    }
+    /* the invariant is that current_pid names a LIVE monad. Matching on pid without `used`
+     * hit freed slots, which keep their old pid — and the CHECK sat inside the loop, so it
+     * ran once per match and moved the test count itself. */
+    int cur_live = 0;
+    for (int i=0; i<MAX_MONADS; i++)
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == curp) cur_live = 1;
+    CHECK("current_has_state", cur_live);
     /* resource accounting */
     CHECK("ps_has_mem", 1); /* ps now includes mem */
 
