@@ -3692,7 +3692,18 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
          * precondition — otherwise it silently measures whatever weather `.soma` restored
          * (it flapped exactly that way: PASS with a persisted field, FAIL from a cold boot) */
         AM_State mood_snapshot = *am_get_state();
-        am_get_state()->emergence = 0.8f;
+        /* The check must own EVERY field input it depends on, not just one. Setting only
+         * emergence looked deterministic across five cold runs — but five runs of the same
+         * cold field prove nothing about a restored `.soma`: a warm field carrying dissonance
+         * and shared tension/pain lets the pressure and shared-chamber terms swamp the moods,
+         * and the check failed exactly there. */
+        AM_State *ms = am_get_state();
+        ms->emergence = 0.8f;          /* the only weight this check wants live */
+        ms->dissonance = 0.0f;         /* no pressure term */
+        ms->tension = ms->pain = ms->flow = ms->warmth = 0.0f;  /* no shared chamber term */
+        ms->velocity_mode = 1;         /* WALK: neutral tempo */
+        ms->velocity_magnitude = 0.0f;
+        ms->wormhole_active = 0;       /* no tunnel skip */
         int m1 = monad_spawn(&K.monads, "mood_tense", 0);
         int m2 = monad_spawn(&K.monads, "mood_calm", 0);
         int i1 = -1, i2 = -1;
@@ -3700,6 +3711,12 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
             if (K.monads.monads[i].used && K.monads.monads[i].pid == m1) i1 = i;
             if (K.monads.monads[i].used && K.monads.monads[i].pid == m2) i2 = i;
         }
+        /* and it must own the monad table too: run the cohort above every other citizen, so
+         * the scheduler is choosing between these two and the mood is the only difference.
+         * Without this the check passes on a fresh boot and fails inside a live system — the
+         * exact shape of the two neighbouring checks that have always been boot-only. */
+        K.monads.monads[i1].priority = 9;
+        K.monads.monads[i2].priority = 9;
         K.monads.monads[i1].mood_tension = 0.9f;
         K.monads.monads[i2].mood_warmth  = 0.9f;
         for (int t = 0; t < 12; t++) monad_tick(&K.monads);
@@ -3714,6 +3731,8 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
             if (K.monads.monads[i].used && K.monads.monads[i].pid == c1) j1 = i;
             if (K.monads.monads[i].used && K.monads.monads[i].pid == c2) j2 = i;
         }
+        K.monads.monads[j1].priority = 9;   /* same isolation for the control pair */
+        K.monads.monads[j2].priority = 9;
         for (int t = 0; t < 12; t++) monad_tick(&K.monads);
         int ctl_gap = K.monads.monads[j1].cpu_time - K.monads.monads[j2].cpu_time;
         K.monads.monads[j1].used = 0; K.monads.monads[j2].used = 0;

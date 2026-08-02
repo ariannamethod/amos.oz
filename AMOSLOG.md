@@ -15,6 +15,45 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-02 — `mood_bends_scheduler` owned one input and thought that was determinism
+
+Found by running the frozen rename scenario against the merged tree: the check passed on a cold
+boot and **failed** when the field came from a persisted `.soma`. The earlier "determinism fix"
+set `emergence` and verified five cold runs — but five runs of the *same* cold field prove
+nothing about a different field. Identical repetitions of one configuration are not evidence of
+independence from configuration.
+
+Two inputs were unowned, and both are now pinned by the check itself:
+- **The field.** A warm `.soma` carries dissonance and shared tension/pain, so the pressure and
+  shared-chamber terms in `monad_choose` swamped the moods the check was measuring. It now zeroes
+  every field term it does not want and raises only `emergence`.
+- **The monad table.** Other citizens with their own moods skew the cohort. The check now runs
+  its four monads at `priority 9`; priority dominates the score (×1000), so the scheduler is
+  choosing *between the cohort members* and the mood is the only difference left.
+
+### Verification
+- Passes in three configurations, not one repeated: cold `.soma`, a `.soma` left by the 41-command
+  scenario, and `selftest` invoked **mid-session inside a live system**.
+- The scenario's own selftest is back to **58/60** — the same two failures the frozen baseline
+  always carried, with `mood_bends_scheduler` now passing *because it is isolated* rather than by
+  luck.
+- Baseline re-frozen at md5 `a8fe8b4d43bcb646c75fbe0ee0d1c46a`, reproducible across three cold
+  runs. It differs from the pre-rename baseline in 10 lines, all **after** the selftest: the
+  cohort at priority 9 consumes ticks that previously went elsewhere, so the tick counter and
+  `cpu_time` totals land differently. The rename's own byte-for-byte proof stands as recorded —
+  this change came after it and is declared, not folded into it.
+
+**Two pre-existing defects found and deliberately left alone** (not mine, named rather than
+silently fixed):
+- `slice_preempt` and `current_has_state` fail whenever `selftest` runs in a live system. They
+  assume a nearly empty monad table and have always been boot-only; the frozen baseline shows
+  both failing at 58/60 long before this pass.
+- `cmd_tick` reports `running=idle` whenever the served monad exhausted its slice in the same
+  tick, because it scans for state `"running"` (`amosoz.c:2507`) instead of naming
+  `K.current_pid`, which the kernel guarantees is always set. A display bug, not a scheduler one.
+
+---
+
 ## 2026-08-02 — Resonant renaming, pass 1: the kernel calls its citizens monads
 
 The roadmap's open item, done as one deliberate pass over **one concept** rather than a sweep
