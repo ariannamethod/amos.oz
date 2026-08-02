@@ -86,6 +86,12 @@ out=$(run 'run alpha' 'run beta' $TICKS 'ps')
 a=$(cpu_of "$out" alpha); b=$(cpu_of "$out" beta)
 [ "$a" = "$b" ] || { echo "FAIL: empty mood no longer reduces to round-robin ($a vs $b)"; exit 1; }
 
+# two monads talking through an AML channel: the writer puts a value on the bus, the reader
+# takes it and sets TENSION from it. A zero field would mean the value never crossed.
+out=$(run "run $ROOT/runtime/talk_write.aml" 'tick' 'tick' "run $ROOT/runtime/talk_read.aml" 'tick' 'tick' 'tick' 'field')
+echo "$out" | grep -q 'AML monad' || { echo "FAIL: talking monads did not open"; exit 1; }
+if echo "$out" | grep -qE 'tension 0\.000'; then echo "FAIL: the value did not cross between monads"; exit 1; fi
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 

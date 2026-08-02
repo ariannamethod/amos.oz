@@ -15,6 +15,39 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-02 — Two monads talk: AML channels cross the boundary between citizens
+
+Until now a monad could only shout into the shared field or drop text in a mailbox. The language
+has had channels all along (`CHANNEL CREATE / WRITE / READ`, spec §20) — they simply did not
+deliver, because `CHANNEL READ` bound the value into a scope top-level code never reads
+(fixed in the canon, `ariannamethod.ai` `d30995e`, re-vendored here).
+
+`runtime/talk_write.aml` puts `0.7` on a bus; `runtime/talk_read.aml`, a **separate monad**
+scheduled later, reads it and sets `TENSION` from it. The field carries `0.694` — the value
+crossed from one citizen to another through the language's own primitive, not through anything
+amosOZ invented.
+
+### Verification
+- Cross-repo falsification: amosOZ rebuilt against the **pre-fix** canon (`d30995e~1`) fails the
+  new treaty case with `the value did not cross between monads`; against the fixed canon the
+  suite passes. The test proves the canon fix actually reaches a scheduled monad rather than
+  merely sitting in the vendored copy.
+- Re-vendor is 8 lines, nothing else drifted. Selftest **60/60** cold and mid-live-system;
+  shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0** on the channel path.
+
+**The hazard, measured rather than guessed.** A monad reading an *empty* channel stalls the whole
+single-threaded kernel: `am_channel_read` polls 1000 × 1 ms before giving up. Same program, same
+monad — **1.27 s** wall clock on an empty bus versus **0.01 s** on a full one. One badly ordered
+`.aml` freezes the system for over a second per read.
+
+Nothing in amosOZ can currently prevent it, and neither can the program itself: the canon exposes
+only `create / write / read / count / close_all` — there is **no** depth query and **no**
+non-blocking read (0 matches in the header). A scheduling host needs both. That is canon work,
+on its own branch, by the maintainer's word; until then the ordering — writer before reader — is
+the only guard, and it is a convention, not a mechanism.
+
+---
+
 ## 2026-08-02 — The selftest told the truth only at boot; now it holds in a live system
 
 The two defects named in the previous entry and deliberately left there are fixed, because a
