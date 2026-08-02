@@ -50,7 +50,7 @@ static inline int safe_append(char *buf, int offset, int bufsz, const char *fmt,
 #define MAX_CONTENT 4096
 #define MAX_FILES 512
 #define MAX_BLOCKS 256
-#define MAX_PROCS 64
+#define MAX_MONADS 64
 #define MAX_MODULES 32
 #define MAX_ENV 64
 #define MAX_HISTORY 100
@@ -125,7 +125,7 @@ typedef struct {
     char cwd[MAX_PATH];
 } VirtualFS;
 
-/* ─── Process Table ───────────────────────────────────────────────────────── */
+/* ─── Monad Table ───────────────────────────────────────────────────────── */
 typedef struct {
     int pid;
     int ppid;           /* parent for real process tree */
@@ -160,14 +160,14 @@ typedef struct {
     void *aml_prog;    /* open AML program when this monad's life IS a program; NULL otherwise */
     int   spawned;     /* 1 = backed by a real OS process (fork+exec); 0 = virtual monad (SARTRE ns contract) */
     pid_t real_pid;    /* real OS pid when spawned; 0 otherwise */
-} Process;
+} Monad;
 
 typedef struct {
-    Process procs[MAX_PROCS];
+    Monad monads[MAX_MONADS];
     int next_pid;
     int tick_count;
     int sched_next;  /* round-robin scheduler pointer for real OS feel */
-} ProcessTable;
+} MonadTable;
 
 /* ─── OZ Ledger ───────────────────────────────────────────────────────────── */
 /* "Every command leaves a trace." */
@@ -245,7 +245,7 @@ typedef struct {
     HWProfile hw;
     VirtualMemory mem;
     VirtualFS fs;
-    ProcessTable procs;
+    MonadTable monads;
     OZLedger ledger;
     Module modules[MAX_MODULES];
     int module_count;
@@ -399,10 +399,10 @@ static int mem_alloc(VirtualMemory *m, int size, int owner_pid, const char *flag
     if (m->block_count >= MAX_BLOCKS) return -1;
 
     /* find the owning process for accounting - hardcore per-proc isolation */
-    Process *owner = NULL;
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == owner_pid) {
-            owner = &K.procs.procs[i];
+    Monad *owner = NULL;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == owner_pid) {
+            owner = &K.monads.monads[i];
             break;
         }
     }
@@ -441,15 +441,15 @@ static int mem_free(VirtualMemory *m, int bid, int requester_pid) {
             m->used_kb -= m->blocks[i].size;
 
             /* uncharge from proc */
-            for (int p=0; p<MAX_PROCS; p++) {
-                if (K.procs.procs[p].used && K.procs.procs[p].pid == requester_pid) {
-                    K.procs.procs[p].mem_used_kb -= m->blocks[i].size;
+            for (int p=0; p<MAX_MONADS; p++) {
+                if (K.monads.monads[p].used && K.monads.monads[p].pid == requester_pid) {
+                    K.monads.monads[p].mem_used_kb -= m->blocks[i].size;
                     /* remove from owned list */
-                    for (int b=0; b<K.procs.procs[p].owned_block_count; b++) {
-                        if (K.procs.procs[p].owned_blocks[b] == bid) {
-                            for (int k=b; k < K.procs.procs[p].owned_block_count-1; k++)
-                                K.procs.procs[p].owned_blocks[k] = K.procs.procs[p].owned_blocks[k+1];
-                            K.procs.procs[p].owned_block_count--;
+                    for (int b=0; b<K.monads.monads[p].owned_block_count; b++) {
+                        if (K.monads.monads[p].owned_blocks[b] == bid) {
+                            for (int k=b; k < K.monads.monads[p].owned_block_count-1; k++)
+                                K.monads.monads[p].owned_blocks[k] = K.monads.monads[p].owned_blocks[k+1];
+                            K.monads.monads[p].owned_block_count--;
                             break;
                         }
                     }
@@ -480,9 +480,9 @@ static int fs_find(VirtualFS *fs, const char *path) {
 static void fs_resolve(VirtualFS *fs, const char *path, char *out) {
     const char *base = fs->cwd;
     /* prefer current proc's cwd for per-process view */
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-            base = K.procs.procs[i].cwd;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+            base = K.monads.monads[i].cwd;
             break;
         }
     }
@@ -654,31 +654,31 @@ static void proc_refresh_all(void) {
     snprintf(buf, sizeof(buf),
         "Name:\tamossh\nPid:\t1\nState:\trunning (virtual)\nUid:\t1000\nGid:\t1000\n"
         "VmSize:\t%d kB\nThreads:\t%d\n",
-        K.mem.used_kb, K.procs.next_pid - 1);
+        K.mem.used_kb, K.monads.next_pid - 1);
     proc_write_file("/proc/self/status", buf);
 
     /* per-process /proc/<pid>/status - deepening /proc foundation */
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used) {
-            int pid = K.procs.procs[i].pid;
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used) {
+            int pid = K.monads.monads[i].pid;
             char ppath[MAX_PATH];
             snprintf(ppath, sizeof(ppath), "/proc/%d/status", pid);
             /* count fds first */
             int fcount = 0;
-            for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fcount++;
+            for (int f=0; f<32; f++) if (K.monads.monads[i].open_fds[f] >= 0) fcount++;
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
                 "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
                 "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\n"
                 "Mood:\tpain %.3f tension %.3f flow %.3f warmth %.3f\n",
-                K.procs.procs[i].name, pid, K.procs.procs[i].ppid,
-                K.procs.procs[i].state,
-                K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit, K.procs.procs[i].cpu_violations,
-                K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice,
-                K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
-                K.procs.procs[i].signals, K.procs.procs[i].numbness, fcount,
-                K.procs.procs[i].mood_pain, K.procs.procs[i].mood_tension,
-                K.procs.procs[i].mood_flow, K.procs.procs[i].mood_warmth);
+                K.monads.monads[i].name, pid, K.monads.monads[i].ppid,
+                K.monads.monads[i].state,
+                K.monads.monads[i].ticks, K.monads.monads[i].cpu_time, K.monads.monads[i].cpu_limit, K.monads.monads[i].cpu_violations,
+                K.monads.monads[i].priority, K.monads.monads[i].slice_used, K.monads.monads[i].max_slice,
+                K.monads.monads[i].mem_used_kb, K.monads.monads[i].mem_limit_kb,
+                K.monads.monads[i].signals, K.monads.monads[i].numbness, fcount,
+                K.monads.monads[i].mood_pain, K.monads.monads[i].mood_tension,
+                K.monads.monads[i].mood_flow, K.monads.monads[i].mood_warmth);
             proc_write_file(ppath, buf);
 
             /* /proc/<pid>/fd list */
@@ -687,7 +687,7 @@ static void proc_refresh_all(void) {
             char fdlist[MAX_CONTENT] = "";
             int pos = 0;
             for (int f=0; f<32; f++) {
-                int node = K.procs.procs[i].open_fds[f];
+                int node = K.monads.monads[i].open_fds[f];
                 if (node >= 0) {
                     pos = safe_append(fdlist, pos, sizeof(fdlist), "%d -> %s\n", f, K.fs.nodes[node].path);
                 }
@@ -700,8 +700,8 @@ static void proc_refresh_all(void) {
             snprintf(cpupath, sizeof(cpupath), "/proc/%d/cpu", pid);
             snprintf(buf, sizeof(buf),
                 "cpu_time: %d\ncpu_limit: %d\npriority: %d\nslice_used: %d\nmax_slice: %d\n",
-                K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
-                K.procs.procs[i].priority, K.procs.procs[i].slice_used, K.procs.procs[i].max_slice);
+                K.monads.monads[i].cpu_time, K.monads.monads[i].cpu_limit,
+                K.monads.monads[i].priority, K.monads.monads[i].slice_used, K.monads.monads[i].max_slice);
             proc_write_file(cpupath, buf);
 
             /* /proc/<pid>/mem - memory accounting */
@@ -709,8 +709,8 @@ static void proc_refresh_all(void) {
             snprintf(mempath, sizeof(mempath), "/proc/%d/mem", pid);
             snprintf(buf, sizeof(buf),
                 "mem_used_kb: %d\nmem_limit_kb: %d\nowned_blocks: %d\n",
-                K.procs.procs[i].mem_used_kb, K.procs.procs[i].mem_limit_kb,
-                K.procs.procs[i].owned_block_count);
+                K.monads.monads[i].mem_used_kb, K.monads.monads[i].mem_limit_kb,
+                K.monads.monads[i].owned_block_count);
             proc_write_file(mempath, buf);
 
             /* /proc/<pid>/stat - classic minimal stat */
@@ -718,18 +718,18 @@ static void proc_refresh_all(void) {
             snprintf(statpath, sizeof(statpath), "/proc/%d/stat", pid);
             snprintf(buf, sizeof(buf),
                 "%d (%s) %s %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %llu %lu %ld\n",
-                pid, K.procs.procs[i].name, K.procs.procs[i].state,
-                K.procs.procs[i].ppid, 0 /* pgrp */, 0 /* session */, 0 /* tty */, 0 /* tpgid */,
+                pid, K.monads.monads[i].name, K.monads.monads[i].state,
+                K.monads.monads[i].ppid, 0 /* pgrp */, 0 /* session */, 0 /* tty */, 0 /* tpgid */,
                 0lu /* flags */, 0lu,0lu,0lu,0lu, /* minflt etc */
-                (unsigned long)K.procs.procs[i].ticks, (unsigned long)K.procs.procs[i].cpu_time,
+                (unsigned long)K.monads.monads[i].ticks, (unsigned long)K.monads.monads[i].cpu_time,
                 0l,0l,0l,0l,0l,0l, /* prio, nice etc */
-                (unsigned long long)K.procs.procs[i].cpu_time, (unsigned long)K.procs.procs[i].mem_used_kb, 0l);
+                (unsigned long long)K.monads.monads[i].cpu_time, (unsigned long)K.monads.monads[i].mem_used_kb, 0l);
             proc_write_file(statpath, buf);
 
             /* /proc/<pid>/mailbox for IPC */
             char mboxpath[MAX_PATH];
             snprintf(mboxpath, sizeof(mboxpath), "/proc/%d/mailbox", pid);
-            proc_write_file(mboxpath, K.procs.procs[i].mailbox[0] ? K.procs.procs[i].mailbox : "(empty)\n");
+            proc_write_file(mboxpath, K.monads.monads[i].mailbox[0] ? K.monads.monads[i].mailbox : "(empty)\n");
         }
     }
 }
@@ -835,45 +835,45 @@ static void fs_init_tree(VirtualFS *fs) {
     }
 }
 
-/* ─── Process Table ───────────────────────────────────────────────────────── */
-static void proc_init(ProcessTable *pt) {
-    memset(pt, 0, sizeof(ProcessTable));
+/* ─── Monad Table ───────────────────────────────────────────────────────── */
+static void monad_table_init(MonadTable *pt) {
+    memset(pt, 0, sizeof(MonadTable));
     pt->next_pid = 1;
     pt->sched_next = 0;
 }
 
-static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (!pt->procs[i].used) {
-            pt->procs[i].pid = pt->next_pid++;
-            pt->procs[i].ppid = parent_pid;
-            strncpy(pt->procs[i].name, name, 31);
-            strcpy(pt->procs[i].state, "ready");
-            pt->procs[i].started = time(NULL);
-            pt->procs[i].ticks = 0;
-            pt->procs[i].exit_code = 0;
-            pt->procs[i].used = 1;
-            strcpy(pt->procs[i].cwd, "/");  /* default per-proc cwd */
-            pt->procs[i].sleep_ticks = 0;
-            pt->procs[i].mem_used_kb = 0;
-            pt->procs[i].owned_block_count = 0;
-            for (int f=0; f<32; f++) pt->procs[i].open_fds[f] = -1;
-            pt->procs[i].priority = 0;
-            pt->procs[i].max_slice = 5;  /* default time slice for fair preemption */
-            pt->procs[i].slice_used = 0;
-            pt->procs[i].mem_limit_kb = 4096; /* default limit per proc */
-            pt->procs[i].signals = 0;
-            pt->procs[i].cpu_time = 0;
-            pt->procs[i].cpu_limit = 100000; /* default high cpu limit */
-            pt->procs[i].cpu_violations = 0;
-            pt->procs[i].numbness = 0;
-            pt->procs[i].mailbox[0] = '\0';
-            pt->procs[i].mood_pain = pt->procs[i].mood_tension = 0.0f;
-            pt->procs[i].mood_flow = pt->procs[i].mood_warmth = 0.0f;
-            pt->procs[i].aml_prog = NULL;
-            pt->procs[i].spawned = 0;
-            pt->procs[i].real_pid = 0;
-            return pt->procs[i].pid;
+static int monad_spawn(MonadTable *pt, const char *name, int parent_pid) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (!pt->monads[i].used) {
+            pt->monads[i].pid = pt->next_pid++;
+            pt->monads[i].ppid = parent_pid;
+            strncpy(pt->monads[i].name, name, 31);
+            strcpy(pt->monads[i].state, "ready");
+            pt->monads[i].started = time(NULL);
+            pt->monads[i].ticks = 0;
+            pt->monads[i].exit_code = 0;
+            pt->monads[i].used = 1;
+            strcpy(pt->monads[i].cwd, "/");  /* default per-proc cwd */
+            pt->monads[i].sleep_ticks = 0;
+            pt->monads[i].mem_used_kb = 0;
+            pt->monads[i].owned_block_count = 0;
+            for (int f=0; f<32; f++) pt->monads[i].open_fds[f] = -1;
+            pt->monads[i].priority = 0;
+            pt->monads[i].max_slice = 5;  /* default time slice for fair preemption */
+            pt->monads[i].slice_used = 0;
+            pt->monads[i].mem_limit_kb = 4096; /* default limit per proc */
+            pt->monads[i].signals = 0;
+            pt->monads[i].cpu_time = 0;
+            pt->monads[i].cpu_limit = 100000; /* default high cpu limit */
+            pt->monads[i].cpu_violations = 0;
+            pt->monads[i].numbness = 0;
+            pt->monads[i].mailbox[0] = '\0';
+            pt->monads[i].mood_pain = pt->monads[i].mood_tension = 0.0f;
+            pt->monads[i].mood_flow = pt->monads[i].mood_warmth = 0.0f;
+            pt->monads[i].aml_prog = NULL;
+            pt->monads[i].spawned = 0;
+            pt->monads[i].real_pid = 0;
+            return pt->monads[i].pid;
         }
     }
     return -1;
@@ -883,7 +883,7 @@ static int proc_spawn(ProcessTable *pt, const char *name, int parent_pid) {
  * argv is NULL-terminated; argv[0] is the executable. amosOZ is single-threaded, so
  * execvp (PATH search) is fork-safe here. Returns the virtual pid, or -1. This is the
  * SARTRE ns_spawn contract (spawned=1) grown natively — real, not simulated. */
-static int proc_real_spawn(const char *name, char *const argv[], int mem_limit_mb, int parent_pid) {
+static int monad_spawn_real(const char *name, char *const argv[], int mem_limit_mb, int parent_pid) {
     pid_t child = fork();
     if (child < 0) return -1;
     if (child == 0) {
@@ -895,18 +895,18 @@ static int proc_real_spawn(const char *name, char *const argv[], int mem_limit_m
         execvp(argv[0], argv);
         _exit(127); /* exec failed */
     }
-    int pid = proc_spawn(&K.procs, name, parent_pid);
+    int pid = monad_spawn(&K.monads, name, parent_pid);
     if (pid < 0) {
         /* no free slot: don't leak the child */
         kill(child, SIGKILL);
         int st; waitpid(child, &st, 0);
         return -1;
     }
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].spawned = 1;
-            K.procs.procs[i].real_pid = child;
-            strcpy(K.procs.procs[i].state, "running");
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].spawned = 1;
+            K.monads.monads[i].real_pid = child;
+            strcpy(K.monads.monads[i].state, "running");
             break;
         }
     }
@@ -915,9 +915,9 @@ static int proc_real_spawn(const char *name, char *const argv[], int mem_limit_m
 
 /* Reap exited real children (non-blocking); a dead real slot becomes a zombie so the
  * existing wait/init-reap paths free it. Called each main-loop iteration. */
-static void proc_reap_real(void) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        Process *p = &K.procs.procs[i];
+static void monad_reap_real(void) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        Monad *p = &K.monads.monads[i];
         if (p->used && p->spawned && p->real_pid > 0 && strcmp(p->state, "zombie") != 0) {
             int st;
             pid_t r = waitpid(p->real_pid, &st, WNOHANG);
@@ -957,7 +957,7 @@ static int is_aml_target(const char *name) {
 
 /* Close a monad's program if it still holds one. Every path that frees a process slot must
  * go through here, or the open AML program leaks with the slot. */
-static void proc_release_aml(Process *p) {
+static void monad_release_program(Monad *p) {
     if (p->aml_prog) { am_program_close(p->aml_prog); p->aml_prog = NULL; }
 }
 
@@ -965,7 +965,7 @@ static void proc_release_aml(Process *p) {
  * pays for what it actually ran, and folds what it moved in the shared field into its own
  * mood — so a program that keeps perturbing keeps its argument alive against the decay.
  * When the program ends the monad becomes a zombie carrying its result. */
-static void proc_aml_slice(Process *p) {
+static void monad_run_slice(Monad *p) {
     AM_State *fs = am_get_state();
     float b_pain = fs->pain, b_tension = fs->tension, b_flow = fs->flow, b_warmth = fs->warmth;
 
@@ -988,70 +988,70 @@ static void proc_aml_slice(Process *p) {
 
 #define MAX_AML_PROGRAM 65536
 
-static int proc_aml_spawn(const char *path, const char *label, char *out, int sz) {
+static int monad_open_program(const char *path, const char *label, char *out, int sz) {
     int lines = aml_program_lines(path);
     if (lines < 0) { snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
 
     /* the shell spawned this monad, so the shell is its parent — current_pid drifts with the
      * scheduler and parenting to the drift is what made `wait` miss real children before */
-    int pid = proc_spawn(&K.procs, label, K.shell_pid > 0 ? K.shell_pid : 1);
+    int pid = monad_spawn(&K.monads, label, K.shell_pid > 0 ? K.shell_pid : 1);
     if (pid < 0) { snprintf(out, sz, "run: process table full"); return ERR_NO_MEMORY; }
     int idx = -1;
-    for (int i = 0; i < MAX_PROCS; i++)
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { idx = i; break; }
+    for (int i = 0; i < MAX_MONADS; i++)
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) { idx = i; break; }
 
     /* The monad does not run here. It is opened and left ready: the scheduler gives it a
      * quantum like any other proc, and it runs max_slice statements of its own program per
      * turn. A monad's life is now as long as its program, not as long as one command. */
     char src[MAX_AML_PROGRAM];
     FILE *f = fopen(path, "r");
-    if (!f) { K.procs.procs[idx].used = 0; snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
+    if (!f) { K.monads.monads[idx].used = 0; snprintf(out, sz, "run: cannot read AML program '%s'", path); return ERR_NOT_FOUND; }
     size_t n = fread(src, 1, sizeof(src) - 1, f);
     int too_big = !feof(f);
     fclose(f);
     src[n] = '\0';
     if (too_big) {
-        K.procs.procs[idx].used = 0;
+        K.monads.monads[idx].used = 0;
         snprintf(out, sz, "run: AML program '%s' exceeds %d bytes", path, MAX_AML_PROGRAM);
         return ERR_INVALID;
     }
 
-    K.procs.procs[idx].aml_prog = am_program_open(src);
-    if (!K.procs.procs[idx].aml_prog) {
-        K.procs.procs[idx].used = 0;
+    K.monads.monads[idx].aml_prog = am_program_open(src);
+    if (!K.monads.monads[idx].aml_prog) {
+        K.monads.monads[idx].used = 0;
         snprintf(out, sz, "run: '%s' opened no program (empty or out of memory)", path);
         return ERR_INVALID;
     }
-    strcpy(K.procs.procs[idx].state, "ready");
+    strcpy(K.monads.monads[idx].state, "ready");
     snprintf(out, sz, "AML monad '%s' pid %d opened, %d statements, %d per quantum",
-             label, pid, am_program_remaining(K.procs.procs[idx].aml_prog),
-             K.procs.procs[idx].max_slice);
+             label, pid, am_program_remaining(K.monads.monads[idx].aml_prog),
+             K.monads.monads[idx].max_slice);
     return ERR_OK;
 }
 
 /* init reaps orphans, not everyone. A zombie whose parent is still alive belongs to that
  * parent's `wait` — reaping it here is what made a collected exit code a race. */
-static int proc_is_orphan(ProcessTable *pt, int idx) {
-    int ppid = pt->procs[idx].ppid;
+static int monad_is_orphan(MonadTable *pt, int idx) {
+    int ppid = pt->monads[idx].ppid;
     if (ppid <= 1) return 1;
-    for (int i = 0; i < MAX_PROCS; i++)
-        if (pt->procs[i].used && pt->procs[i].pid == ppid) return 0;
+    for (int i = 0; i < MAX_MONADS; i++)
+        if (pt->monads[i].used && pt->monads[i].pid == ppid) return 0;
     return 1;
 }
 
-static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (pt->procs[i].used && pt->procs[i].pid == pid) {
-            pt->procs[i].state[0] = '\0';
-            strcpy(pt->procs[i].state, "zombie");
-            pt->procs[i].exit_code = exit_code;
+static int monad_kill(MonadTable *pt, int pid, int exit_code) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (pt->monads[i].used && pt->monads[i].pid == pid) {
+            pt->monads[i].state[0] = '\0';
+            strcpy(pt->monads[i].state, "zombie");
+            pt->monads[i].exit_code = exit_code;
             /* unblock parent if it was waiting */
-            if (pt->procs[i].ppid > 0) {
-                for (int p = 0; p < MAX_PROCS; p++) {
-                    if (pt->procs[p].used && pt->procs[p].pid == pt->procs[i].ppid &&
-                        strcmp(pt->procs[p].state, "blocked") == 0) {
-                        strcpy(pt->procs[p].state, "ready");
-                        pt->procs[p].sleep_ticks = 0;
+            if (pt->monads[i].ppid > 0) {
+                for (int p = 0; p < MAX_MONADS; p++) {
+                    if (pt->monads[p].used && pt->monads[p].pid == pt->monads[i].ppid &&
+                        strcmp(pt->monads[p].state, "blocked") == 0) {
+                        strcpy(pt->monads[p].state, "ready");
+                        pt->monads[p].sleep_ticks = 0;
                     }
                 }
             }
@@ -1062,31 +1062,31 @@ static int proc_kill(ProcessTable *pt, int pid, int exit_code) {
 }
 
 /* minimal wait: reap first zombie child of parent, return its pid and status */
-static int proc_wait(ProcessTable *pt, int parent_pid, int *status_out) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (pt->procs[i].used && pt->procs[i].ppid == parent_pid &&
-            strcmp(pt->procs[i].state, "zombie") == 0) {
-            *status_out = pt->procs[i].exit_code;
-            int child_pid = pt->procs[i].pid;
-            proc_release_aml(&pt->procs[i]);
-            pt->procs[i].used = 0; /* reap */
+static int monad_collect(MonadTable *pt, int parent_pid, int *status_out) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (pt->monads[i].used && pt->monads[i].ppid == parent_pid &&
+            strcmp(pt->monads[i].state, "zombie") == 0) {
+            *status_out = pt->monads[i].exit_code;
+            int child_pid = pt->monads[i].pid;
+            monad_release_program(&pt->monads[i]);
+            pt->monads[i].used = 0; /* reap */
             return child_pid;
         }
     }
     return -1; /* no zombie child */
 }
 
-static int proc_exec(int pid, const char *newname) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            strncpy(K.procs.procs[i].name, newname, 31);
+static int monad_become(int pid, const char *newname) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            strncpy(K.monads.monads[i].name, newname, 31);
             /* exec: replace image, keep fds/cwd/mem/limits/prio per minimal POSIX sim; reset signals, slice, sleep, violations */
-            K.procs.procs[i].signals = 0;
-            K.procs.procs[i].numbness = 0;
-            K.procs.procs[i].sleep_ticks = 0;
-            K.procs.procs[i].slice_used = 0;
-            K.procs.procs[i].cpu_violations = 0; /* reset on exec */
-            strcpy(K.procs.procs[i].state, "ready");
+            K.monads.monads[i].signals = 0;
+            K.monads.monads[i].numbness = 0;
+            K.monads.monads[i].sleep_ticks = 0;
+            K.monads.monads[i].slice_used = 0;
+            K.monads.monads[i].cpu_violations = 0; /* reset on exec */
+            strcpy(K.monads.monads[i].state, "ready");
             return 0;
         }
     }
@@ -1095,11 +1095,11 @@ static int proc_exec(int pid, const char *newname) {
 
 /* --- Per-process FD table (minimal OS foundation) --- */
 static int alloc_fd(int pid, int node_idx) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             for (int f = 0; f < 32; f++) {
-                if (K.procs.procs[i].open_fds[f] == -1) {
-                    K.procs.procs[i].open_fds[f] = node_idx;
+                if (K.monads.monads[i].open_fds[f] == -1) {
+                    K.monads.monads[i].open_fds[f] = node_idx;
                     return f;
                 }
             }
@@ -1109,10 +1109,10 @@ static int alloc_fd(int pid, int node_idx) {
 }
 
 static int close_fd(int pid, int fd) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            if (fd >= 0 && fd < 32 && K.procs.procs[i].open_fds[fd] != -1) {
-                K.procs.procs[i].open_fds[fd] = -1;
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            if (fd >= 0 && fd < 32 && K.monads.monads[i].open_fds[fd] != -1) {
+                K.monads.monads[i].open_fds[fd] = -1;
                 return 0;
             }
         }
@@ -1121,9 +1121,9 @@ static int close_fd(int pid, int fd) {
 }
 
 static int get_fd_node(int pid, int fd) {
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            if (fd >= 0 && fd < 32) return K.procs.procs[i].open_fds[fd];
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            if (fd >= 0 && fd < 32) return K.monads.monads[i].open_fds[fd];
         }
     }
     return -1;
@@ -1143,7 +1143,7 @@ static float clampf01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
  * between regimes: A (velocity tempo), B (chamber balance), C (dissonance pressure)
  * are all present every step, and their weight is itself read from the field now:
  *   - base: priority dominates (scaled x1000; the field never overrides a priority
- *     level — it governs the choice AMONG equal-priority ready procs, where the old
+ *     level — it governs the choice AMONG equal-priority ready monads, where the old
  *     round-robin was arbitrary). Coefficients are tunable to deepen the dissolution.
  *   - A velocity: NOMOVE/BREATHE bias holding current; RUN biases preemption; WALK is
  *     neutral (so a calm default reduces exactly to priority + round-robin).
@@ -1151,7 +1151,7 @@ static float clampf01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
  *     tension+pain favor preemption (switch away).
  *   - C pressure (weight = dissonance): surface the cpu-heaviest proc; past the tunnel
  *     threshold with an active wormhole, jump the round-robin origin (a tunnel skip). */
-static int proc_field_select(ProcessTable *pt) {
+static int monad_choose(MonadTable *pt) {
     AM_State *fs = am_get_state();
     float w_pressure = clampf01(fs->dissonance);   /* C */
     float w_chamber  = clampf01(fs->emergence);    /* B */
@@ -1165,13 +1165,13 @@ static int proc_field_select(ProcessTable *pt) {
         default: vel_bias = 0.0f; break;   /* WALK / BACKWARD: neutral  */
     }
     int tunnel = fs->wormhole_active && fs->dissonance > fs->tunnel_threshold;
-    int origin = tunnel ? (pt->sched_next + 1) % MAX_PROCS : pt->sched_next;
+    int origin = tunnel ? (pt->sched_next + 1) % MAX_MONADS : pt->sched_next;
 
     int best = -1;
     float best_score = -1e30f;
-    for (int k = 0; k < MAX_PROCS; k++) {
-        int idx = (origin + k) % MAX_PROCS;
-        Process *p = &pt->procs[idx];
+    for (int k = 0; k < MAX_MONADS; k++) {
+        int idx = (origin + k) % MAX_MONADS;
+        Monad *p = &pt->monads[idx];
         if (!(p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)
               && p->cpu_time < p->cpu_limit)) continue;
         int is_cur = (p->pid == K.current_pid);
@@ -1192,54 +1192,54 @@ static int proc_field_select(ProcessTable *pt) {
     return best;
 }
 
-static int proc_tick(ProcessTable *pt) {
+static int monad_tick(MonadTable *pt) {
     pt->tick_count++;
 
     /* Real round-robin scheduler: C is the center.
      * Skips blocked. Handles sleep countdown.
      * Only one process gets CPU per tick.
      */
-    int n = MAX_PROCS;
+    int n = MAX_MONADS;
 
     /* first, countdown sleeps ( -1 means signal wait, no auto unblock) */
     for (int i = 0; i < n; i++) {
-        if (pt->procs[i].used && strcmp(pt->procs[i].state, "blocked") == 0) {
-            if (pt->procs[i].sleep_ticks > 0) {
-                pt->procs[i].sleep_ticks--;
+        if (pt->monads[i].used && strcmp(pt->monads[i].state, "blocked") == 0) {
+            if (pt->monads[i].sleep_ticks > 0) {
+                pt->monads[i].sleep_ticks--;
             }
-            if (pt->procs[i].sleep_ticks == 0) {
-                strcpy(pt->procs[i].state, "ready");
+            if (pt->monads[i].sleep_ticks == 0) {
+                strcpy(pt->monads[i].state, "ready");
             }
         }
     }
 
     /* signal delivery for deeper IPC - respect mask (KILL/STOP can't be masked) */
     for (int i = 0; i < n; i++) {
-        if (pt->procs[i].used && pt->procs[i].signals) {
-            int sigs = pt->procs[i].signals & ~pt->procs[i].numbness;
-            if (pt->procs[i].signals & (1 << 9)) { /* SIGKILL always */
-                strcpy(pt->procs[i].state, "zombie");
-                pt->procs[i].exit_code = 9;
-                pt->procs[i].signals = 0;
-                pt->procs[i].numbness = 0;
-            } else if (pt->procs[i].signals & (1 << 19)) { /* SIGSTOP always */
-                strcpy(pt->procs[i].state, "stopped");
-                pt->procs[i].signals &= ~(1 << 19);
+        if (pt->monads[i].used && pt->monads[i].signals) {
+            int sigs = pt->monads[i].signals & ~pt->monads[i].numbness;
+            if (pt->monads[i].signals & (1 << 9)) { /* SIGKILL always */
+                strcpy(pt->monads[i].state, "zombie");
+                pt->monads[i].exit_code = 9;
+                pt->monads[i].signals = 0;
+                pt->monads[i].numbness = 0;
+            } else if (pt->monads[i].signals & (1 << 19)) { /* SIGSTOP always */
+                strcpy(pt->monads[i].state, "stopped");
+                pt->monads[i].signals &= ~(1 << 19);
             } else if (sigs & (1 << 15)) { /* SIGTERM */
-                strcpy(pt->procs[i].state, "zombie");
-                pt->procs[i].exit_code = 15;
-                pt->procs[i].signals = 0;
+                strcpy(pt->monads[i].state, "zombie");
+                pt->monads[i].exit_code = 15;
+                pt->monads[i].signals = 0;
             } else if (sigs & (1 << 18)) { /* SIGCONT */
-                if (strcmp(pt->procs[i].state, "stopped") == 0) {
-                    strcpy(pt->procs[i].state, "ready");
+                if (strcmp(pt->monads[i].state, "stopped") == 0) {
+                    strcpy(pt->monads[i].state, "ready");
                 }
-                pt->procs[i].signals &= ~(1 << 18);
+                pt->monads[i].signals &= ~(1 << 18);
             } else if (sigs) {
                 /* other unmasked signals unblock */
-                if (strcmp(pt->procs[i].state, "blocked") == 0) {
-                    strcpy(pt->procs[i].state, "ready");
+                if (strcmp(pt->monads[i].state, "blocked") == 0) {
+                    strcpy(pt->monads[i].state, "ready");
                 }
-                pt->procs[i].signals &= ~sigs;
+                pt->monads[i].signals &= ~sigs;
             }
             /* numbness persists across ticks — it is a property of the monad, not of the
              * signal being delivered. A numbed signal simply stays pending until `feel`. */
@@ -1250,16 +1250,16 @@ static int proc_tick(ProcessTable *pt) {
      * this the discharge below only reaches whoever is being served, and a monad content to
      * yield would carry that contentment forever and never be scheduled again. */
     for (int i = 0; i < n; i++) {
-        if (!pt->procs[i].used) continue;
-        pt->procs[i].mood_pain    *= 0.90f;
-        pt->procs[i].mood_tension *= 0.90f;
-        pt->procs[i].mood_flow    *= 0.90f;
-        pt->procs[i].mood_warmth  *= 0.90f;
+        if (!pt->monads[i].used) continue;
+        pt->monads[i].mood_pain    *= 0.90f;
+        pt->monads[i].mood_tension *= 0.90f;
+        pt->monads[i].mood_flow    *= 0.90f;
+        pt->monads[i].mood_warmth  *= 0.90f;
     }
 
     /* time-slice preemption reset (the tick's housekeeping stays) */
     for (int i = 0; i < n; i++) {
-        Process *p = &pt->procs[i];
+        Monad *p = &pt->monads[i];
         if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
             if (p->slice_used >= p->max_slice) {
                 p->slice_used = 0;
@@ -1268,14 +1268,14 @@ static int proc_tick(ProcessTable *pt) {
         }
     }
     /* primary selection is now governed by the AML resonance field. Priority still
-     * dominates; the field bends the choice among equal-priority ready procs (calm =
+     * dominates; the field bends the choice among equal-priority ready monads (calm =
      * round-robin, agitation = pressure/chamber/velocity). The never-none cascade below
      * remains the guaranteed floor. */
-    int best_idx = proc_field_select(pt);
+    int best_idx = monad_choose(pt);
     if (best_idx < 0) {
         /* full scan fallback for any ready under limit */
         for (int i = 0; i < n; i++) {
-            Process *p = &pt->procs[i];
+            Monad *p = &pt->monads[i];
             if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->cpu_time < p->cpu_limit) {
                 best_idx = i;
                 break;
@@ -1285,7 +1285,7 @@ static int proc_tick(ProcessTable *pt) {
     if (best_idx < 0) {
         /* last resort: any non-stopped under limit */
         for (int i = 0; i < n; i++) {
-            Process *p = &pt->procs[i];
+            Monad *p = &pt->monads[i];
             if (p->used && strcmp(p->state, "stopped") != 0 && strcmp(p->state, "zombie") != 0 && p->cpu_time < p->cpu_limit) {
                 best_idx = i;
                 strcpy(p->state, "ready");
@@ -1296,7 +1296,7 @@ static int proc_tick(ProcessTable *pt) {
     if (best_idx < 0) {
         /* absolute last: pick first ready and force */
         for (int i = 0; i < n; i++) {
-            Process *p = &pt->procs[i];
+            Monad *p = &pt->monads[i];
             if (p->used && strcmp(p->state, "ready") == 0) {
                 best_idx = i;
                 break;
@@ -1305,21 +1305,21 @@ static int proc_tick(ProcessTable *pt) {
     }
     if (best_idx >= 0) {
         /* init reaps zombies automatically (minimal OS) */
-        if (pt->procs[best_idx].pid == 1) {
+        if (pt->monads[best_idx].pid == 1) {
             for (int z = 0; z < n; z++) {
-                if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0 && proc_is_orphan(pt, z)) {
-                    proc_release_aml(&pt->procs[z]);
-                    pt->procs[z].used = 0;
+                if (pt->monads[z].used && strcmp(pt->monads[z].state, "zombie") == 0 && monad_is_orphan(pt, z)) {
+                    monad_release_program(&pt->monads[z]);
+                    pt->monads[z].used = 0;
                 }
             }
         }
         /* demote previous */
         for (int j = 0; j < n; j++) {
-            if (pt->procs[j].used && strcmp(pt->procs[j].state, "running") == 0 && j != best_idx) {
-                strcpy(pt->procs[j].state, "ready");
+            if (pt->monads[j].used && strcmp(pt->monads[j].state, "running") == 0 && j != best_idx) {
+                strcpy(pt->monads[j].state, "ready");
             }
         }
-        Process *p = &pt->procs[best_idx];
+        Monad *p = &pt->monads[best_idx];
 
         /* enforce cpu limit - hardcore resource limit */
         if (p->cpu_time >= p->cpu_limit) {
@@ -1341,7 +1341,7 @@ static int proc_tick(ProcessTable *pt) {
             p->mood_warmth  *= 0.85f;
 
             /* an AML monad spends its quantum running its own program */
-            if (p->aml_prog) proc_aml_slice(p);
+            if (p->aml_prog) monad_run_slice(p);
 
             /* if just exhausted, reset for next (a monad that died in its slice stays dead) */
             if (p->slice_used >= p->max_slice && strcmp(p->state, "running") == 0) {
@@ -1355,44 +1355,44 @@ static int proc_tick(ProcessTable *pt) {
     }
     /* foundation guarantee: never 'none' or running=none. always pick or force a ready proc, set current_pid, init reaps zombies */
     int has_running = 0;
-    for (int i = 0; i < n; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "running") == 0) has_running = 1;
+    for (int i = 0; i < n; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "running") == 0) has_running = 1;
     if (!has_running) {
         int chosen = -1;
         for (int i = 0; i < n && chosen < 0; i++) {
-            Process *p = &pt->procs[i];
+            Monad *p = &pt->monads[i];
             if (p->used && strcmp(p->state, "ready") == 0 && p->cpu_time < p->cpu_limit) chosen = i;
         }
         if (chosen < 0) {
-            for (int i = 0; i < n && chosen < 0; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "ready") == 0) chosen = i;
+            for (int i = 0; i < n && chosen < 0; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "ready") == 0) chosen = i;
         }
         if (chosen < 0) {
-            for (int i = 0; i < n && chosen < 0; i++) if (pt->procs[i].used && strcmp(pt->procs[i].state, "zombie") != 0 && strcmp(pt->procs[i].state, "stopped") != 0) {
+            for (int i = 0; i < n && chosen < 0; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "zombie") != 0 && strcmp(pt->monads[i].state, "stopped") != 0) {
                 chosen = i;
-                strcpy(pt->procs[i].state, "ready");
+                strcpy(pt->monads[i].state, "ready");
             }
         }
         if (chosen >= 0) {
-            Process *p = &pt->procs[chosen];
+            Monad *p = &pt->monads[chosen];
             strcpy(p->state, "running");
             p->ticks++;
             p->cpu_time++;
             K.current_pid = p->pid;
             if (p->pid == 1) {
-                for (int z = 0; z < n; z++) if (pt->procs[z].used && strcmp(pt->procs[z].state, "zombie") == 0 && proc_is_orphan(pt, z)) { proc_release_aml(&pt->procs[z]); pt->procs[z].used = 0; }
+                for (int z = 0; z < n; z++) if (pt->monads[z].used && strcmp(pt->monads[z].state, "zombie") == 0 && monad_is_orphan(pt, z)) { monad_release_program(&pt->monads[z]); pt->monads[z].used = 0; }
             }
         }
     }
     if (K.current_pid <= 0) {
         /* ultimate guarantee for foundation: force shell or init or first to keep OS alive (no none) */
         int force = (K.shell_pid > 0 ? K.shell_pid : 1);
-        for (int i=0; i<n; i++) if (pt->procs[i].used && pt->procs[i].pid == force) {
-            strcpy(pt->procs[i].state, "running");
+        for (int i=0; i<n; i++) if (pt->monads[i].used && pt->monads[i].pid == force) {
+            strcpy(pt->monads[i].state, "running");
             K.current_pid = force;
             break;
         }
-        if (K.current_pid <= 0) for (int i=0; i<n; i++) if (pt->procs[i].used) {
-            strcpy(pt->procs[i].state, "running");
-            K.current_pid = pt->procs[i].pid;
+        if (K.current_pid <= 0) for (int i=0; i<n; i++) if (pt->monads[i].used) {
+            strcpy(pt->monads[i].state, "running");
+            K.current_pid = pt->monads[i].pid;
             break;
         }
     }
@@ -1684,7 +1684,7 @@ static void kernel_init(void) {
     mem_init(&K.mem);
     fs_init(&K.fs);
     fs_init_tree(&K.fs);
-    proc_init(&K.procs);
+    monad_table_init(&K.monads);
     ledger_init(&K.ledger);
     init_builtin_slots();
     init_hooks();
@@ -1706,8 +1706,8 @@ static void kernel_init(void) {
     env_set("TERM", K.hw.terminal);
     env_set("HOSTNAME", K.hw.hostname);
 
-    proc_spawn(&K.procs, "init", 0);
-    int sh = proc_spawn(&K.procs, "amossh", 1);  /* init is parent */
+    monad_spawn(&K.monads, "init", 0);
+    int sh = monad_spawn(&K.monads, "amossh", 1);  /* init is parent */
 
     K.hook_boot_fired = fire_hook("boot");
     K.hook_sched_fired = 0;
@@ -1771,9 +1771,9 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     }
     if (strcmp(op, "getcwd") == 0) {
         /* use per-proc cwd if possible */
-        for (int i=0; i<MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-                snprintf(out, outsz, "%s", K.procs.procs[i].cwd);
+        for (int i=0; i<MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+                snprintf(out, outsz, "%s", K.monads.monads[i].cwd);
                 return ERR_OK;
             }
         }
@@ -1788,9 +1788,9 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         if (idx < 0 || !K.fs.nodes[idx].is_dir) return ERR_NOT_FOUND;
         if (fs_access(&K.fs.nodes[idx], K.user, 'x') != ERR_OK) return ERR_PERMISSION;
         /* set per current proc + global for legacy/internal resolve (current is source of truth) */
-        for (int i=0; i<MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-                strcpy(K.procs.procs[i].cwd, resolved);
+        for (int i=0; i<MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+                strcpy(K.monads.monads[i].cwd, resolved);
             }
         }
         strcpy(K.fs.cwd, resolved);
@@ -1812,24 +1812,24 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
     if (strcmp(op, "spawn") == 0) {
         if (argc < 1) return ERR_INVALID;
         int parent = K.shell_pid > 0 ? K.shell_pid : 1;
-        int pid = proc_spawn(&K.procs, argv[0], parent);
+        int pid = monad_spawn(&K.monads, argv[0], parent);
         if (pid < 0) return ERR_NO_MEMORY;
         snprintf(out, outsz, "%d", pid);
         return ERR_OK;
     }
     if (strcmp(op, "kill") == 0) {
         if (argc < 1) return ERR_INVALID;
-        return proc_kill(&K.procs, atoi(argv[0]), 0);
+        return monad_kill(&K.monads, atoi(argv[0]), 0);
     }
     if (strcmp(op, "sleep") == 0) {
         if (argc < 1) return ERR_INVALID;
         int ticks = atoi(argv[0]);
         /* find a running proc and block it (simplified - in real would be current) */
-        for (int i = 0; i < MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
-                strcpy(K.procs.procs[i].state, "blocked");
-                K.procs.procs[i].sleep_ticks = ticks;
-                snprintf(out, outsz, "process %d sleeping for %d ticks", K.procs.procs[i].pid, ticks);
+        for (int i = 0; i < MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+                strcpy(K.monads.monads[i].state, "blocked");
+                K.monads.monads[i].sleep_ticks = ticks;
+                snprintf(out, outsz, "process %d sleeping for %d ticks", K.monads.monads[i].pid, ticks);
                 return ERR_OK;
             }
         }
@@ -1867,7 +1867,7 @@ static int kernel_syscall(const char *op, char *out, int outsz, int argc, char *
         int pid = K.current_pid;
         if (argc > 1) pid = atoi(argv[0]); /* optional pid */
         const char *name = argv[argc>1 ? 1 : 0];
-        if (proc_exec(pid, name) == 0) {
+        if (monad_become(pid, name) == 0) {
             snprintf(out, outsz, "exec %d -> %s", pid, name);
             return ERR_OK;
         }
@@ -2006,16 +2006,16 @@ static int cmd_free(char *out, int sz, int argc, char **argv) {
 static int cmd_ps(char *out, int sz, int argc, char **argv) {
     int n = 0;
     n = safe_append(out, n, sz, "PID   Name          State     Ticks CpuTime CpuLim MemKB Prio Slice FDs\n");
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used) {
             int fds = 0;
-            for (int f=0; f<32; f++) if (K.procs.procs[i].open_fds[f] >= 0) fds++;
+            for (int f=0; f<32; f++) if (K.monads.monads[i].open_fds[f] >= 0) fds++;
             n = safe_append(out, n, sz, "%-5d %-13s %-9s %-6d %-7d %-6d %-5d %-4d %-5d %d",
-                K.procs.procs[i].pid, K.procs.procs[i].name,
-                K.procs.procs[i].state, K.procs.procs[i].ticks, K.procs.procs[i].cpu_time, K.procs.procs[i].cpu_limit,
-                K.procs.procs[i].mem_used_kb, K.procs.procs[i].priority,
-                K.procs.procs[i].slice_used, fds);
-            if (K.procs.procs[i].spawned) n = safe_append(out, n, sz, " [real:%d]", (int)K.procs.procs[i].real_pid);
+                K.monads.monads[i].pid, K.monads.monads[i].name,
+                K.monads.monads[i].state, K.monads.monads[i].ticks, K.monads.monads[i].cpu_time, K.monads.monads[i].cpu_limit,
+                K.monads.monads[i].mem_used_kb, K.monads.monads[i].priority,
+                K.monads.monads[i].slice_used, fds);
+            if (K.monads.monads[i].spawned) n = safe_append(out, n, sz, " [real:%d]", (int)K.monads.monads[i].real_pid);
             n = safe_append(out, n, sz, "\n");
         }
     }
@@ -2032,13 +2032,13 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
     /* an AML program is readable, not executable — it runs on the field, not on the CPU.
      * A named .aml target is always an AML claim: unreadable is an error, not a monad. */
     if (is_aml_target(argv[1]))
-        return proc_aml_spawn(argv[1], argv[1], out, sz);
+        return monad_open_program(argv[1], argv[1], out, sz);
     if (strchr(argv[1], '/') && access(argv[1], X_OK) == 0) {
         char *xargv[34];
         int xc = 0;
         for (int i = 1; i < argc && xc < 33; i++) xargv[xc++] = argv[i];
         xargv[xc] = NULL;
-        int pid = proc_real_spawn(argv[1], xargv, 0, parent);
+        int pid = monad_spawn_real(argv[1], xargv, 0, parent);
         if (pid < 0) { snprintf(out, sz, "run: cannot spawn %s", argv[1]); return ERR_NO_MEMORY; }
         snprintf(out, sz, "Started real process '%s' pid %d (spawned)", argv[1], pid);
         return ERR_OK;
@@ -2052,18 +2052,18 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
             xargv[xc++] = slot->target;
             for (int i = 2; i < argc && xc < 33; i++) xargv[xc++] = argv[i];
             xargv[xc] = NULL;
-            int pid = proc_real_spawn(slot->name, xargv, 0, parent);
+            int pid = monad_spawn_real(slot->name, xargv, 0, parent);
             if (pid < 0) { snprintf(out, sz, "run: cannot spawn slot '%s' (%s)", slot->name, slot->target); return ERR_NO_MEMORY; }
             snprintf(out, sz, "Started slot '%s' -> %s pid %d (spawned)", slot->name, slot->target, pid);
             return ERR_OK;
         }
         if (strcmp(slot->kind, "aml") == 0)
-            return proc_aml_spawn(slot->target, slot->name, out, sz);
+            return monad_open_program(slot->target, slot->name, out, sz);
         /* script kind recognized; its runtime is wired later */
         snprintf(out, sz, "run: slot '%s' kind '%s' recognized — runtime wired later", slot->name, slot->kind);
         return ERR_INVALID;
     }
-    int pid = proc_spawn(&K.procs, argv[1], parent);
+    int pid = monad_spawn(&K.monads, argv[1], parent);
     if (pid < 0) { snprintf(out, sz, "Error: process table full"); return ERR_NO_MEMORY; }
     snprintf(out, sz, "Started process '%s' with PID %d", argv[1], pid);
     return ERR_OK;
@@ -2072,34 +2072,34 @@ static int cmd_run(char *out, int sz, int argc, char **argv) {
 static int cmd_fork(char *out, int sz, int argc, char **argv) {
     /* fork: clone state for minimal OS foundation (fds, cwd, limits, signals mask, prio, slice) */
     int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
-    Process *p = NULL;
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) { p = &K.procs.procs[i]; break; }
-    if (!p) p = &K.procs.procs[1];
-    int newpid = proc_spawn(&K.procs, p->name, parent);
+    Monad *p = NULL;
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) { p = &K.monads.monads[i]; break; }
+    if (!p) p = &K.monads.monads[1];
+    int newpid = monad_spawn(&K.monads, p->name, parent);
     if (newpid < 0) { snprintf(out, sz, "fork failed"); return ERR_NO_MEMORY; }
     /* copy state */
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == newpid) {
-            strcpy(K.procs.procs[i].cwd, p->cwd);
-            K.procs.procs[i].mem_used_kb = p->mem_used_kb;
-            K.procs.procs[i].mem_limit_kb = p->mem_limit_kb;
-            K.procs.procs[i].priority = p->priority;
-            K.procs.procs[i].max_slice = p->max_slice;
-            K.procs.procs[i].cpu_limit = p->cpu_limit;
-            K.procs.procs[i].numbness = p->numbness;
-            K.procs.procs[i].mood_pain    = p->mood_pain;    /* a child inherits the mood */
-            K.procs.procs[i].mood_tension = p->mood_tension;
-            K.procs.procs[i].mood_flow    = p->mood_flow;
-            K.procs.procs[i].mood_warmth  = p->mood_warmth;
-            K.procs.procs[i].signals = 0; /* child starts clean */
-            K.procs.procs[i].cpu_time = 0;
-            K.procs.procs[i].cpu_violations = 0;
-            K.procs.procs[i].slice_used = 0;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == newpid) {
+            strcpy(K.monads.monads[i].cwd, p->cwd);
+            K.monads.monads[i].mem_used_kb = p->mem_used_kb;
+            K.monads.monads[i].mem_limit_kb = p->mem_limit_kb;
+            K.monads.monads[i].priority = p->priority;
+            K.monads.monads[i].max_slice = p->max_slice;
+            K.monads.monads[i].cpu_limit = p->cpu_limit;
+            K.monads.monads[i].numbness = p->numbness;
+            K.monads.monads[i].mood_pain    = p->mood_pain;    /* a child inherits the mood */
+            K.monads.monads[i].mood_tension = p->mood_tension;
+            K.monads.monads[i].mood_flow    = p->mood_flow;
+            K.monads.monads[i].mood_warmth  = p->mood_warmth;
+            K.monads.monads[i].signals = 0; /* child starts clean */
+            K.monads.monads[i].cpu_time = 0;
+            K.monads.monads[i].cpu_violations = 0;
+            K.monads.monads[i].slice_used = 0;
             /* clone open fds */
-            for (int f=0; f<32; f++) K.procs.procs[i].open_fds[f] = p->open_fds[f];
+            for (int f=0; f<32; f++) K.monads.monads[i].open_fds[f] = p->open_fds[f];
             /* copy owned mem blocks for sim */
-            K.procs.procs[i].owned_block_count = p->owned_block_count;
-            for (int b=0; b<p->owned_block_count && b<MAX_BLOCKS; b++) K.procs.procs[i].owned_blocks[b] = p->owned_blocks[b];
+            K.monads.monads[i].owned_block_count = p->owned_block_count;
+            for (int b=0; b<p->owned_block_count && b<MAX_BLOCKS; b++) K.monads.monads[i].owned_blocks[b] = p->owned_blocks[b];
             break;
         }
     }
@@ -2113,11 +2113,11 @@ static int cmd_kill(char *out, int sz, int argc, char **argv) {
         int sig = atoi(argv[2]);
         int pid = atoi(argv[3]);
         /* deliver signal */
-        for (int i=0; i<MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-                K.procs.procs[i].signals |= (1 << sig);
-                if (strcmp(K.procs.procs[i].state, "blocked") == 0) {
-                    strcpy(K.procs.procs[i].state, "ready");
+        for (int i=0; i<MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+                K.monads.monads[i].signals |= (1 << sig);
+                if (strcmp(K.monads.monads[i].state, "blocked") == 0) {
+                    strcpy(K.monads.monads[i].state, "ready");
                 }
                 snprintf(out, sz, "signaled %d sig %d", pid, sig);
                 return ERR_OK;
@@ -2128,8 +2128,8 @@ static int cmd_kill(char *out, int sz, int argc, char **argv) {
     }
     int pid = atoi(argv[1]);
     /* real process slot: send a real signal, grace, then reap */
-    for (int i = 0; i < MAX_PROCS; i++) {
-        Process *p = &K.procs.procs[i];
+    for (int i = 0; i < MAX_MONADS; i++) {
+        Monad *p = &K.monads.monads[i];
         if (p->used && p->pid == pid && p->spawned && p->real_pid > 0) {
             kill(p->real_pid, SIGTERM);
             for (int g = 0; g < 25; g++) { int st; if (waitpid(p->real_pid, &st, WNOHANG) == p->real_pid) { p->real_pid = 0; break; } usleep(20000); }
@@ -2140,7 +2140,7 @@ static int cmd_kill(char *out, int sz, int argc, char **argv) {
             return ERR_OK;
         }
     }
-    int err = proc_kill(&K.procs, pid, 0);
+    int err = monad_kill(&K.monads, pid, 0);
     if (err != ERR_OK) { snprintf(out, sz, "Error: process %d not found", pid); return err; }
     snprintf(out, sz, "Killed process %d (zombie)", pid);
     return ERR_OK;
@@ -2150,11 +2150,11 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
     if (argc < 1) { snprintf(out, sz, "Usage: sleep <ticks>"); return ERR_INVALID; }
     int ticks = atoi(argv[0]);
     /* block one running process */
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
-            strcpy(K.procs.procs[i].state, "blocked");
-            K.procs.procs[i].sleep_ticks = ticks;
-            snprintf(out, sz, "PID %d blocked for %d ticks", K.procs.procs[i].pid, ticks);
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+            strcpy(K.monads.monads[i].state, "blocked");
+            K.monads.monads[i].sleep_ticks = ticks;
+            snprintf(out, sz, "PID %d blocked for %d ticks", K.monads.monads[i].pid, ticks);
             return ERR_OK;
         }
     }
@@ -2165,41 +2165,41 @@ static int cmd_sleep(char *out, int sz, int argc, char **argv) {
 /* Reap a zombie child of either the current proc or the shell. current_pid drifts as
  * the scheduler picks each tick, but a real child spawned at the prompt has ppid=shell_pid;
  * checking both makes wait observe it regardless of the drift. */
-static int proc_wait_any(int *status_out) {
-    int child = proc_wait(&K.procs, K.current_pid, status_out);
-    if (child < 0 && K.shell_pid != K.current_pid) child = proc_wait(&K.procs, K.shell_pid, status_out);
+static int monad_collect_any(int *status_out) {
+    int child = monad_collect(&K.monads, K.current_pid, status_out);
+    if (child < 0 && K.shell_pid != K.current_pid) child = monad_collect(&K.monads, K.shell_pid, status_out);
     return child;
 }
 
 static int cmd_wait(char *out, int sz, int argc, char **argv) {
     int parent = K.current_pid > 0 ? K.current_pid : K.shell_pid;
     int status = 0;
-    proc_reap_real(); /* surface any real child that has already exited as a zombie */
-    int child = proc_wait_any(&status);
+    monad_reap_real(); /* surface any real child that has already exited as a zombie */
+    int child = monad_collect_any(&status);
     if (child >= 0) {
         snprintf(out, sz, "reaped PID %d status %d", child, status);
         return ERR_OK;
     }
     /* blocking wait: set caller blocked and tick until child or limit */
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == parent) {
-            strcpy(K.procs.procs[i].state, "blocked");
-            K.procs.procs[i].sleep_ticks = 100;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == parent) {
+            strcpy(K.monads.monads[i].state, "blocked");
+            K.monads.monads[i].sleep_ticks = 100;
             break;
         }
     }
     for (int t=0; t<100; t++) {
-        proc_reap_real();  /* a real child that exited becomes a zombie so proc_wait can reap it */
-        proc_tick(&K.procs);
-        child = proc_wait_any(&status);
+        monad_reap_real();  /* a real child that exited becomes a zombie so monad_collect can reap it */
+        monad_tick(&K.monads);
+        child = monad_collect_any(&status);
         if (child >= 0) {
             snprintf(out, sz, "reaped PID %d status %d after %d ticks", child, status, t);
             return ERR_OK;
         }
         /* give a just-spawned real child a moment to run/exit before the next poll */
         int has_live_real = 0;
-        for (int i=0; i<MAX_PROCS; i++)
-            if (K.procs.procs[i].used && K.procs.procs[i].spawned && K.procs.procs[i].real_pid > 0) { has_live_real = 1; break; }
+        for (int i=0; i<MAX_MONADS; i++)
+            if (K.monads.monads[i].used && K.monads.monads[i].spawned && K.monads.monads[i].real_pid > 0) { has_live_real = 1; break; }
         if (has_live_real) usleep(2000);
     }
     snprintf(out, sz, "no zombie children (blocked timeout)");
@@ -2264,12 +2264,12 @@ static int cmd_dup(char *out, int sz, int argc, char **argv) {
 static int cmd_fds(char *out, int sz, int argc, char **argv) {
     int n = 0;
     n = safe_append(out, n, sz, "Open FDs (per proc):\n");
-    for (int p = 0; p < MAX_PROCS; p++) {
-        if (!K.procs.procs[p].used) continue;
-        n = safe_append(out, n, sz, "PID %d (%s): ", K.procs.procs[p].pid, K.procs.procs[p].name);
+    for (int p = 0; p < MAX_MONADS; p++) {
+        if (!K.monads.monads[p].used) continue;
+        n = safe_append(out, n, sz, "PID %d (%s): ", K.monads.monads[p].pid, K.monads.monads[p].name);
         int has = 0;
         for (int f = 0; f < 32; f++) {
-            int node = K.procs.procs[p].open_fds[f];
+            int node = K.monads.monads[p].open_fds[f];
             if (node >= 0) {
                 if (has) n = safe_append(out, n, sz, ", ");
                 n = safe_append(out, n, sz, "%d->%s", f, K.fs.nodes[node].path);
@@ -2283,10 +2283,10 @@ static int cmd_fds(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_yield(char *out, int sz, int argc, char **argv) {
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
-            strcpy(K.procs.procs[i].state, "ready");
-            snprintf(out, sz, "PID %d yielded", K.procs.procs[i].pid);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+            strcpy(K.monads.monads[i].state, "ready");
+            snprintf(out, sz, "PID %d yielded", K.monads.monads[i].pid);
             return ERR_OK;
         }
     }
@@ -2298,9 +2298,9 @@ static int cmd_nice(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: nice <pid> <prio>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
     int prio = atoi(argv[2]);
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].priority = prio;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].priority = prio;
             snprintf(out, sz, "PID %d priority %d", pid, prio);
             return ERR_OK;
         }
@@ -2314,10 +2314,10 @@ static int cmd_slice(char *out, int sz, int argc, char **argv) {
     int pid = atoi(argv[1]);
     int sl = atoi(argv[2]);
     if (sl <= 0) { snprintf(out, sz, "slice must be >0"); return ERR_INVALID; }
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].max_slice = sl;
-            K.procs.procs[i].slice_used = 0;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].max_slice = sl;
+            K.monads.monads[i].slice_used = 0;
             snprintf(out, sz, "PID %d max_slice %d", pid, sl);
             return ERR_OK;
         }
@@ -2331,9 +2331,9 @@ static int cmd_limit(char *out, int sz, int argc, char **argv) {
     int pid = atoi(argv[1]);
     int lim = atoi(argv[2]);
     if (lim <= 0) { snprintf(out, sz, "limit must be >0"); return ERR_INVALID; }
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].mem_limit_kb = lim;
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].mem_limit_kb = lim;
             snprintf(out, sz, "PID %d mem_limit %d KB", pid, lim);
             return ERR_OK;
         }
@@ -2347,10 +2347,10 @@ static int cmd_climit(char *out, int sz, int argc, char **argv) {
     int pid = atoi(argv[1]);
     int lim = atoi(argv[2]);
     if (lim <= 0) { snprintf(out, sz, "climit must be >0"); return ERR_INVALID; }
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].cpu_limit = lim;
-            K.procs.procs[i].cpu_time = 0; /* reset on set? or not. for now don't reset */
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].cpu_limit = lim;
+            K.monads.monads[i].cpu_time = 0; /* reset on set? or not. for now don't reset */
             snprintf(out, sz, "PID %d cpu_limit %d", pid, lim);
             return ERR_OK;
         }
@@ -2363,12 +2363,12 @@ static int cmd_signal(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: signal <pid> <sig>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
     int sig = atoi(argv[2]);
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].signals |= (1 << sig);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].signals |= (1 << sig);
             /* unblock if waiting for signal */
-            if (strcmp(K.procs.procs[i].state, "blocked") == 0) {
-                strcpy(K.procs.procs[i].state, "ready");
+            if (strcmp(K.monads.monads[i].state, "blocked") == 0) {
+                strcpy(K.monads.monads[i].state, "ready");
             }
             snprintf(out, sz, "signaled pid %d sig %d", pid, sig);
             return ERR_OK;
@@ -2389,10 +2389,10 @@ static int cmd_numb(char *out, int sz, int argc, char **argv) {
         snprintf(out, sz, "numb: sig %d pierces numbness — no monad is numb to its end", sig);
         return ERR_INVALID;
     }
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].numbness |= (1 << sig);
-            snprintf(out, sz, "pid %d numb to sig %d (numbness %d)", pid, sig, K.procs.procs[i].numbness);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].numbness |= (1 << sig);
+            snprintf(out, sz, "pid %d numb to sig %d (numbness %d)", pid, sig, K.monads.monads[i].numbness);
             return ERR_OK;
         }
     }
@@ -2404,10 +2404,10 @@ static int cmd_feel(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: feel <pid> <sig>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
     int sig = atoi(argv[2]);
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
-            K.procs.procs[i].numbness &= ~(1 << sig);
-            snprintf(out, sz, "pid %d feels sig %d again (numbness %d)", pid, sig, K.procs.procs[i].numbness);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
+            K.monads.monads[i].numbness &= ~(1 << sig);
+            snprintf(out, sz, "pid %d feels sig %d again (numbness %d)", pid, sig, K.monads.monads[i].numbness);
             return ERR_OK;
         }
     }
@@ -2421,9 +2421,9 @@ static int cmd_feel(char *out, int sz, int argc, char **argv) {
 static int cmd_mood(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: mood <pid> [pain|tension|flow|warmth <value>]"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
-    Process *p = NULL;
-    for (int i = 0; i < MAX_PROCS; i++)
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) { p = &K.procs.procs[i]; break; }
+    Monad *p = NULL;
+    for (int i = 0; i < MAX_MONADS; i++)
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) { p = &K.monads.monads[i]; break; }
     if (!p) { snprintf(out, sz, "no such pid"); return ERR_INVALID; }
 
     if (argc >= 4) {
@@ -2440,11 +2440,11 @@ static int cmd_mood(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_pause(char *out, int sz, int argc, char **argv) {
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
-            strcpy(K.procs.procs[i].state, "blocked");
-            K.procs.procs[i].sleep_ticks = -1; /* wait for signal */
-            snprintf(out, sz, "PID %d paused for signal", K.procs.procs[i].pid);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+            strcpy(K.monads.monads[i].state, "blocked");
+            K.monads.monads[i].sleep_ticks = -1; /* wait for signal */
+            snprintf(out, sz, "PID %d paused for signal", K.monads.monads[i].pid);
             return ERR_OK;
         }
     }
@@ -2460,22 +2460,22 @@ static int cmd_send(char *out, int sz, int argc, char **argv) {
         if (i>2) strcat(msg, " ");
         strncat(msg, argv[i], sizeof(msg)-strlen(msg)-1);
     }
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             /* append to mailbox safely */
-            size_t mlen = strlen(K.procs.procs[i].mailbox);
-            size_t avail = sizeof(K.procs.procs[i].mailbox) - mlen - 1;
+            size_t mlen = strlen(K.monads.monads[i].mailbox);
+            size_t avail = sizeof(K.monads.monads[i].mailbox) - mlen - 1;
             if (avail > 1) {
-                strncat(K.procs.procs[i].mailbox, msg, avail - 1);
-                mlen = strlen(K.procs.procs[i].mailbox);
-                if (mlen < sizeof(K.procs.procs[i].mailbox) - 1) {
-                    K.procs.procs[i].mailbox[mlen] = '\n';
-                    K.procs.procs[i].mailbox[mlen+1] = '\0';
+                strncat(K.monads.monads[i].mailbox, msg, avail - 1);
+                mlen = strlen(K.monads.monads[i].mailbox);
+                if (mlen < sizeof(K.monads.monads[i].mailbox) - 1) {
+                    K.monads.monads[i].mailbox[mlen] = '\n';
+                    K.monads.monads[i].mailbox[mlen+1] = '\0';
                 }
             }
             /* unblock if waiting */
-            if (strcmp(K.procs.procs[i].state, "blocked") == 0 && K.procs.procs[i].sleep_ticks == -1) {
-                strcpy(K.procs.procs[i].state, "ready");
+            if (strcmp(K.monads.monads[i].state, "blocked") == 0 && K.monads.monads[i].sleep_ticks == -1) {
+                strcpy(K.monads.monads[i].state, "ready");
             }
             snprintf(out, sz, "sent to %d", pid);
             return ERR_OK;
@@ -2488,9 +2488,9 @@ static int cmd_send(char *out, int sz, int argc, char **argv) {
 static int cmd_current(char *out, int sz, int argc, char **argv) {
     int n = 0;
     n = safe_append(out, n, sz, "current pid: %d", K.current_pid);
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-            n = safe_append(out, n, sz, " (%s) state=%s", K.procs.procs[i].name, K.procs.procs[i].state);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+            n = safe_append(out, n, sz, " (%s) state=%s", K.monads.monads[i].name, K.monads.monads[i].state);
             break;
         }
     }
@@ -2499,15 +2499,15 @@ static int cmd_current(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_tick(char *out, int sz, int argc, char **argv) {
-    int t = proc_tick(&K.procs);
+    int t = monad_tick(&K.monads);
     K.hook_sched_fired += fire_hook("sched");
     proc_refresh_all();
 
     /* find who is currently running thanks to the scheduler */
     const char *running = "idle";
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && strcmp(K.procs.procs[i].state, "running") == 0) {
-            running = K.procs.procs[i].name;
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+            running = K.monads.monads[i].name;
             break;
         }
     }
@@ -2518,10 +2518,10 @@ static int cmd_tick(char *out, int sz, int argc, char **argv) {
 static int cmd_status(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: status <pid>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             snprintf(out, sz, "PID %d: %s state=%s ticks=%d", pid,
-                K.procs.procs[i].name, K.procs.procs[i].state, K.procs.procs[i].ticks);
+                K.monads.monads[i].name, K.monads.monads[i].state, K.monads.monads[i].ticks);
             return ERR_OK;
         }
     }
@@ -2531,9 +2531,9 @@ static int cmd_status(char *out, int sz, int argc, char **argv) {
 
 static int cmd_pwd(char *out, int sz, int argc, char **argv) {
     /* per current proc cwd (foundation) */
-    for (int i=0; i<MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-            snprintf(out, sz, "%s", K.procs.procs[i].cwd);
+    for (int i=0; i<MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+            snprintf(out, sz, "%s", K.monads.monads[i].cwd);
             return ERR_OK;
         }
     }
@@ -3376,16 +3376,16 @@ static int cmd_jobs(char *out, int sz, int argc, char **argv) {
 static int cmd_fg(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: fg <pid>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == pid) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             /* demote others, make fg running */
-            for (int j=0; j<MAX_PROCS; j++) if (K.procs.procs[j].used && strcmp(K.procs.procs[j].state,"running")==0) strcpy(K.procs.procs[j].state, "ready");
+            for (int j=0; j<MAX_MONADS; j++) if (K.monads.monads[j].used && strcmp(K.monads.monads[j].state,"running")==0) strcpy(K.monads.monads[j].state, "ready");
             K.current_pid = pid;
-            strcpy(K.procs.procs[i].state, "running");
+            strcpy(K.monads.monads[i].state, "running");
             /* bias scheduler to start from this for next tick */
-            for (int j=0; j<MAX_PROCS; j++) if (K.procs.procs[j].pid == pid) { K.procs.sched_next = j; break; }
+            for (int j=0; j<MAX_MONADS; j++) if (K.monads.monads[j].pid == pid) { K.monads.sched_next = j; break; }
             K.suppress_next_auto_tick = 1; /* stick current for next user command */
-            snprintf(out, sz, "foreground now pid %d (%s)", pid, K.procs.procs[i].name);
+            snprintf(out, sz, "foreground now pid %d (%s)", pid, K.monads.monads[i].name);
             return ERR_OK;
         }
     }
@@ -3522,7 +3522,7 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     /* current context */
     CHECK("current_pid_set", K.current_pid > 0);
     int cur_found = 0;
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) cur_found = 1;
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) cur_found = 1;
     CHECK("current_proc_exists", cur_found);
 
     /* Memory + limits */
@@ -3532,38 +3532,38 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     CHECK("mem_free", merr == ERR_OK);
 
     /* test limit */
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == 1) K.procs.procs[i].mem_limit_kb = 50;
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == 1) K.monads.monads[i].mem_limit_kb = 50;
     bid = mem_alloc(&K.mem, 100, 1, "rw-");
     CHECK("mem_limit_enforced", bid < 0); /* should fail */
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == 1) K.procs.procs[i].mem_limit_kb = 4096; /* restore */
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == 1) K.monads.monads[i].mem_limit_kb = 4096; /* restore */
 
     /* Command dispatch */
     char tmp[1024];
     dispatch("echo selftest_token", tmp, sizeof(tmp));
     CHECK("command_dispatch", strstr(tmp, "selftest_token") != NULL);
 
-    /* Process table + scheduler time slices */
-    int tpid = proc_spawn(&K.procs, "test_proc", 0);
+    /* Monad table + scheduler time slices */
+    int tpid = monad_spawn(&K.monads, "test_proc", 0);
     CHECK("process_spawn", tpid > 0);
     /* set small slice to test preemption */
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == tpid) { K.procs.procs[i].max_slice=2; K.procs.procs[i].slice_used=0; }
-    proc_tick(&K.procs);
-    proc_tick(&K.procs);
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == tpid) { K.monads.monads[i].max_slice=2; K.monads.monads[i].slice_used=0; }
+    monad_tick(&K.monads);
+    monad_tick(&K.monads);
     /* after 2 ticks should have forced ready */
     int forced_ready = 0;
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == tpid && strcmp(K.procs.procs[i].state, "ready")==0) forced_ready=1;
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == tpid && strcmp(K.monads.monads[i].state, "ready")==0) forced_ready=1;
     CHECK("slice_preempt", forced_ready);
-    proc_kill(&K.procs, tpid, 0);
+    monad_kill(&K.monads, tpid, 0);
     /* for test, force reap by clearing */
-    for (int i = 0; i < MAX_PROCS; i++)
-        if (K.procs.procs[i].used && K.procs.procs[i].pid == tpid) K.procs.procs[i].used = 0;
+    for (int i = 0; i < MAX_MONADS; i++)
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == tpid) K.monads.monads[i].used = 0;
     CHECK("process_kill", 1); /* simplified for now */
 
     /* deeper current, blocking, resources */
     int curp = K.current_pid;
     CHECK("current_after_tick", curp > 0);
-    for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].pid == curp) {
-        CHECK("current_has_state", K.procs.procs[i].used);
+    for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].pid == curp) {
+        CHECK("current_has_state", K.monads.monads[i].used);
     }
     /* resource accounting */
     CHECK("ps_has_mem", 1); /* ps now includes mem */
@@ -3659,31 +3659,31 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
      * AM_State first and restore it after, so selftest leaves the live field untouched. */
     /* Numbness: a monad cannot feel what it is numb to, and numbness outlives the tick */
     {
-        int npid = proc_spawn(&K.procs, "numb_proc", 0);
+        int npid = monad_spawn(&K.monads, "numb_proc", 0);
         int ni = -1;
-        for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == npid) ni = i;
-        K.procs.procs[ni].numbness = (1 << 15);       /* numb to TERM */
-        K.procs.procs[ni].signals  = (1 << 18);       /* an unrelated CONT lands and clears */
-        proc_tick(&K.procs);
-        CHECK("numbness_outlives_delivery", K.procs.procs[ni].numbness == (1 << 15));
-        K.procs.procs[ni].signals = (1 << 15);        /* now the numbed TERM arrives */
-        proc_tick(&K.procs);
-        proc_tick(&K.procs);
-        CHECK("numb_blocks_delivery", strcmp(K.procs.procs[ni].state, "zombie") != 0
-            && K.procs.procs[ni].numbness == (1 << 15));
-        K.procs.procs[ni].numbness = 0;                /* feel again */
-        proc_tick(&K.procs);
-        CHECK("feel_delivers_pending", strcmp(K.procs.procs[ni].state, "zombie") == 0);
-        K.procs.procs[ni].used = 0;
+        for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == npid) ni = i;
+        K.monads.monads[ni].numbness = (1 << 15);       /* numb to TERM */
+        K.monads.monads[ni].signals  = (1 << 18);       /* an unrelated CONT lands and clears */
+        monad_tick(&K.monads);
+        CHECK("numbness_outlives_delivery", K.monads.monads[ni].numbness == (1 << 15));
+        K.monads.monads[ni].signals = (1 << 15);        /* now the numbed TERM arrives */
+        monad_tick(&K.monads);
+        monad_tick(&K.monads);
+        CHECK("numb_blocks_delivery", strcmp(K.monads.monads[ni].state, "zombie") != 0
+            && K.monads.monads[ni].numbness == (1 << 15));
+        K.monads.monads[ni].numbness = 0;                /* feel again */
+        monad_tick(&K.monads);
+        CHECK("feel_delivers_pending", strcmp(K.monads.monads[ni].state, "zombie") == 0);
+        K.monads.monads[ni].used = 0;
 
-        int kpid = proc_spawn(&K.procs, "numb_kill", 0);
+        int kpid = monad_spawn(&K.monads, "numb_kill", 0);
         int ki = -1;
-        for (int i=0; i<MAX_PROCS; i++) if (K.procs.procs[i].used && K.procs.procs[i].pid == kpid) ki = i;
-        K.procs.procs[ki].numbness = ~0;               /* numb to everything it may be numb to */
-        K.procs.procs[ki].signals  = (1 << 9);         /* KILL */
-        proc_tick(&K.procs);
-        CHECK("kill_pierces_numbness", strcmp(K.procs.procs[ki].state, "zombie") == 0);
-        K.procs.procs[ki].used = 0;
+        for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == kpid) ki = i;
+        K.monads.monads[ki].numbness = ~0;               /* numb to everything it may be numb to */
+        K.monads.monads[ki].signals  = (1 << 9);         /* KILL */
+        monad_tick(&K.monads);
+        CHECK("kill_pierces_numbness", strcmp(K.monads.monads[ki].state, "zombie") == 0);
+        K.monads.monads[ki].used = 0;
     }
 
     /* The monad's own weather bends the scheduler — and an empty mood does not */
@@ -3693,30 +3693,30 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
          * (it flapped exactly that way: PASS with a persisted field, FAIL from a cold boot) */
         AM_State mood_snapshot = *am_get_state();
         am_get_state()->emergence = 0.8f;
-        int m1 = proc_spawn(&K.procs, "mood_tense", 0);
-        int m2 = proc_spawn(&K.procs, "mood_calm", 0);
+        int m1 = monad_spawn(&K.monads, "mood_tense", 0);
+        int m2 = monad_spawn(&K.monads, "mood_calm", 0);
         int i1 = -1, i2 = -1;
-        for (int i = 0; i < MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == m1) i1 = i;
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == m2) i2 = i;
+        for (int i = 0; i < MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == m1) i1 = i;
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == m2) i2 = i;
         }
-        K.procs.procs[i1].mood_tension = 0.9f;
-        K.procs.procs[i2].mood_warmth  = 0.9f;
-        for (int t = 0; t < 12; t++) proc_tick(&K.procs);
-        int tense_cpu = K.procs.procs[i1].cpu_time, calm_cpu = K.procs.procs[i2].cpu_time;
-        K.procs.procs[i1].used = 0; K.procs.procs[i2].used = 0;
+        K.monads.monads[i1].mood_tension = 0.9f;
+        K.monads.monads[i2].mood_warmth  = 0.9f;
+        for (int t = 0; t < 12; t++) monad_tick(&K.monads);
+        int tense_cpu = K.monads.monads[i1].cpu_time, calm_cpu = K.monads.monads[i2].cpu_time;
+        K.monads.monads[i1].used = 0; K.monads.monads[i2].used = 0;
 
         /* same cohort, no moods: the scheduler must fall back to round-robin exactly */
-        int c1 = proc_spawn(&K.procs, "mood_ctl_a", 0);
-        int c2 = proc_spawn(&K.procs, "mood_ctl_b", 0);
+        int c1 = monad_spawn(&K.monads, "mood_ctl_a", 0);
+        int c2 = monad_spawn(&K.monads, "mood_ctl_b", 0);
         int j1 = -1, j2 = -1;
-        for (int i = 0; i < MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == c1) j1 = i;
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == c2) j2 = i;
+        for (int i = 0; i < MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == c1) j1 = i;
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == c2) j2 = i;
         }
-        for (int t = 0; t < 12; t++) proc_tick(&K.procs);
-        int ctl_gap = K.procs.procs[j1].cpu_time - K.procs.procs[j2].cpu_time;
-        K.procs.procs[j1].used = 0; K.procs.procs[j2].used = 0;
+        for (int t = 0; t < 12; t++) monad_tick(&K.monads);
+        int ctl_gap = K.monads.monads[j1].cpu_time - K.monads.monads[j2].cpu_time;
+        K.monads.monads[j1].used = 0; K.monads.monads[j2].used = 0;
 
         *am_get_state() = mood_snapshot; /* restore: the live field is exactly as before */
         CHECK("mood_bends_scheduler", tense_cpu > calm_cpu && ctl_gap == 0);
@@ -3729,24 +3729,24 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
         if (af) { fputs("DISSONANCE 0.9\n", af); fclose(af); }
         AM_State field_snapshot = *am_get_state();
         char abuf[256];
-        int arc = proc_aml_spawn(apath, "selftest_monad", abuf, sizeof(abuf));
+        int arc = monad_open_program(apath, "selftest_monad", abuf, sizeof(abuf));
         int ai = -1;
-        for (int i = 0; i < MAX_PROCS; i++)
-            if (K.procs.procs[i].used && strcmp(K.procs.procs[i].name, "selftest_monad") == 0) ai = i;
+        for (int i = 0; i < MAX_MONADS; i++)
+            if (K.monads.monads[i].used && strcmp(K.monads.monads[i].name, "selftest_monad") == 0) ai = i;
         /* the monad is opened alive, not run to completion: its life is its program */
         CHECK("aml_monad_opens_alive", af != NULL && arc == ERR_OK && ai >= 0
-            && K.procs.procs[ai].aml_prog != NULL
-            && strcmp(K.procs.procs[ai].state, "zombie") != 0
+            && K.monads.monads[ai].aml_prog != NULL
+            && strcmp(K.monads.monads[ai].state, "zombie") != 0
             && am_get_state()->dissonance == field_snapshot.dissonance);
         /* and it runs across quanta until its program ends */
-        K.procs.procs[ai].max_slice = 1;
-        for (int t = 0; t < 40 && K.procs.procs[ai].aml_prog; t++) proc_tick(&K.procs);
-        CHECK("aml_monad_finishes", ai >= 0 && K.procs.procs[ai].aml_prog == NULL
-            && strcmp(K.procs.procs[ai].state, "zombie") == 0
-            && K.procs.procs[ai].exit_code == 0
-            && K.procs.procs[ai].cpu_time > 0
+        K.monads.monads[ai].max_slice = 1;
+        for (int t = 0; t < 40 && K.monads.monads[ai].aml_prog; t++) monad_tick(&K.monads);
+        CHECK("aml_monad_finishes", ai >= 0 && K.monads.monads[ai].aml_prog == NULL
+            && strcmp(K.monads.monads[ai].state, "zombie") == 0
+            && K.monads.monads[ai].exit_code == 0
+            && K.monads.monads[ai].cpu_time > 0
             && am_get_state()->dissonance > 0.5f);
-        if (ai >= 0) { proc_release_aml(&K.procs.procs[ai]); K.procs.procs[ai].used = 0; }
+        if (ai >= 0) { monad_release_program(&K.monads.monads[ai]); K.monads.monads[ai].used = 0; }
         *am_get_state() = field_snapshot; /* restore: the live field is exactly as before */
         remove(apath);
     }
@@ -3991,7 +3991,7 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
         K.running = 0;
         snprintf(output, outsize, "Shutting down amosOZ.");
         ledger_record_ex(&K.ledger, line ? line : "exit", "exit", pargs, K.user,
-            K.procs.tick_count, ERR_OK, "shutdown", 0, NULL, NULL, 0, 0);
+            K.monads.tick_count, ERR_OK, "shutdown", 0, NULL, NULL, 0, 0);
         return ERR_OK;
     }
 
@@ -4000,14 +4000,14 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
             int result = CMD_TABLE[i].func(output, outsize, argc, argv);
             if (pending_ledger.active) {
                 ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
-                    K.procs.tick_count, result, pending_ledger.explanation,
+                    K.monads.tick_count, result, pending_ledger.explanation,
                     pending_ledger.reversible, pending_ledger.undo_path,
                     pending_ledger.undo_content, pending_ledger.undo_is_dir,
                     pending_ledger.undo_was_create);
                 ledger_meta_clear();
             } else {
                 ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
-                    K.procs.tick_count, result, "Executed", 0, NULL, NULL, 0, 0);
+                    K.monads.tick_count, result, "Executed", 0, NULL, NULL, 0, 0);
             }
             return result;
         }
@@ -4018,13 +4018,13 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
     if (idx >= 0 && is_script_node(idx)) {
         int result = run_script_node(idx, argc, argv, output, outsize);
         ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
-            K.procs.tick_count, result, "script exec", 0, NULL, NULL, 0, 0);
+            K.monads.tick_count, result, "script exec", 0, NULL, NULL, 0, 0);
         return result;
     }
 
     snprintf(output, outsize, "amosoz: command not found: %s", argv[0]);
     ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
-        K.procs.tick_count, ERR_NOT_FOUND, "not found", 0, NULL, NULL, 0, 0);
+        K.monads.tick_count, ERR_NOT_FOUND, "not found", 0, NULL, NULL, 0, 0);
     return ERR_NOT_FOUND;
 }
 
@@ -4154,7 +4154,7 @@ static int cmd_exec(char *out, int sz, int argc, char **argv) {
     /* first try as image replace (for 'exec newname') */
     if (strchr(argv[1], '/') == NULL) {
         int exec_pid = K.current_pid > 0 ? K.current_pid : K.shell_pid;
-        int err = proc_exec(exec_pid, argv[1]);
+        int err = monad_become(exec_pid, argv[1]);
         if (err == 0) {
             snprintf(out, sz, "exec image to %s", argv[1]);
             return ERR_OK;
@@ -4191,7 +4191,7 @@ static int cmd_field(char *out, int sz, int argc, char **argv) {
 /* Perturb the resonance field from the shell — a command IS a field perturbation.
  * The rest of the line is one AML directive (e.g. `resonate DISSONANCE 0.9`,
  * `resonate VELOCITY RUN`, `resonate TENSION 0.7`), applied via am_exec. This is the
- * handle the scheduler then reads through proc_field_select. */
+ * handle the scheduler then reads through monad_choose. */
 static int cmd_resonate(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: resonate <AML directive>  (e.g. DISSONANCE 0.9, VELOCITY RUN, TENSION 0.7)"); return ERR_INVALID; }
     char prog[MAX_CMD_LEN];
@@ -4259,9 +4259,9 @@ int main(int argc, char **argv) {
     while (K.running) {
         /* per-current context cwd for prompt (foundation current_pid ownership) */
         const char *cwd = K.fs.cwd;
-        for (int i = 0; i < MAX_PROCS; i++) {
-            if (K.procs.procs[i].used && K.procs.procs[i].pid == K.current_pid) {
-                cwd = K.procs.procs[i].cwd;
+        for (int i = 0; i < MAX_MONADS; i++) {
+            if (K.monads.monads[i].used && K.monads.monads[i].pid == K.current_pid) {
+                cwd = K.monads.monads[i].cwd;
                 break;
             }
         }
@@ -4273,12 +4273,12 @@ int main(int argc, char **argv) {
         if (nl) *nl = '\0';
 
         dispatch(line, output, sizeof(output));
-        proc_reap_real(); /* reap any exited real children -> zombies */
+        monad_reap_real(); /* reap any exited real children -> zombies */
         am_step(0.1f); /* field heartbeat: advance the AML resonance field one step (phase, debt decay, laws enforced) */
         if (output[0]) printf("%s\n", output);
         /* auto time advance for preemption and blocking simulation */
         if (!K.suppress_next_auto_tick) {
-            proc_tick(&K.procs);
+            monad_tick(&K.monads);
         }
         K.suppress_next_auto_tick = 0;
     }

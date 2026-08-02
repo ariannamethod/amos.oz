@@ -5,14 +5,47 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ## Roadmap (open — not yet done)
 
-- **`.aml` budgeted execution.** A monad currently consumes its quantum whole (D1). Real time-slicing needs an `am_exec_step` / `am_resume` API the canon does not have; that is upstream work on `ariannamethod.ai`, on its own branch, by the maintainer's word.
-- **Resonant renaming.** Move internal function/command names toward the resonant register of
-  SARTRE (schumann / overlay / tongue / namespace / prophecy) and AML (destiny / prophecy /
-  pain / wormhole / scar), as amosOZ grows its SARTRE-compatible resonance core. The Unix-treaty
-  userland (`ls`, `ps`, `kill`, pipes) stays at the surface where it IS the point; the kernel
-  internals take the resonant names. This cascades into the command table and touches the treaty
-  identity — do it deliberately in one pass, not casually. (Side effect: relaxes vocabulary-based
-  classifier pressure on routine OS-code.)
+- **Suspending inside a loop.** D3 slices a monad at top-level statements, which is where the
+  canon's `am_program_step` can yield. A `while` still runs all of its iterations inside one
+  step, because the block state lives on the C stack. Lifting it into the program handle is
+  upstream work on `ariannamethod.ai` — worth doing when a real monad hits the wall, not before.
+- **Resonant renaming, pass 2.** Pass 1 took the monad concept (2026-08-02). The ledger, slots,
+  hooks and contracts still carry neutral names; they are the OZ layer and can take the resonant
+  register when that layer next grows. The Unix-treaty userland stays as it is, permanently.
+
+---
+
+## 2026-08-02 — Resonant renaming, pass 1: the kernel calls its citizens monads
+
+The roadmap's open item, done as one deliberate pass over **one concept** rather than a sweep
+over 193 static functions. The code already called them monads in its own comments (`spawned=1`
+real, `0` = virtual monad, the SARTRE ns contract); the identifiers said `Process`. Now they
+agree: `Monad` / `MonadTable` / `MAX_MONADS`, `K.monads`, and the lifecycle verbs —
+`monad_spawn`, `monad_kill`, `monad_collect` (was `proc_wait`), `monad_collect_any`,
+`monad_become` (was `proc_exec` — exec replaces the image), `monad_tick`, `monad_choose` (was
+`proc_field_select` — it is where the parliament decides), `monad_is_orphan`,
+`monad_spawn_real`, `monad_reap_real`, `monad_open_program`, `monad_run_slice`,
+`monad_release_program`.
+
+**What was deliberately left alone.** The Unix treaty userland is untouched — `ls`, `ps`,
+`kill`, `cd`, pipes, redirects are the treaty, and renaming them would be renaming the point of
+the project. The `/proc` helpers keep their `proc_` prefix (`proc_is_virtual`,
+`proc_refresh_all`, `proc_write_file`): they serve the `/proc` surface, not the process concept.
+And the sweep stopped at the monad concept — `fs_find` gains nothing by becoming resonant, and a
+rename that touches everything is a rename nobody can review.
+
+### Verification
+- **A rename must be behaviourally empty, so the invariant is the output itself.** A 41-command
+  scenario (boot, spawn, moods, ticks, signals, fs, pipes, memory, devices, OZ meta, selftest,
+  field, an `.aml` monad, wait) was frozen **before** the change: 312 lines,
+  md5 `1e449ddd9ebf80aac82fa07e11a2c093`, verified reproducible across three cold runs.
+  After the rename the same scenario produces **the same md5** — byte for byte, twice: once
+  after the type/function pass and again after the `procs` → `monads` field pass.
+- Not half-applied: `grep` for every old name (`Process`, `ProcessTable`, `MAX_PROCS`, all 14
+  `proc_*` lifecycle verbs, the `procs` field) returns **0**. A half-rename is the `sigmask`
+  failure mode and is worse than none.
+- `make` 0 errors; selftest **60/60**, 0 FAIL; shell treaty **ALL PASSED**; `html_selftest`
+  **43/43**; ASan **0** errors on the same scenario.
 
 ---
 
