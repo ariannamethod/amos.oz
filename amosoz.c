@@ -2439,6 +2439,17 @@ static int cmd_mood(char *out, int sz, int argc, char **argv) {
     return ERR_OK;
 }
 
+/* Channels are how monads talk. Reading an empty one through CHANNEL READ stalls the whole
+ * kernel for ~1.3 s, so a monad's author needs to be able to look before it reads — and so
+ * does whoever is debugging why the system froze. */
+static int cmd_channel(char *out, int sz, int argc, char **argv) {
+    if (argc < 2) { snprintf(out, sz, "%d channel(s) active — `channel <name>` for depth", am_channel_count()); return ERR_OK; }
+    int d = am_channel_depth(argv[1]);
+    if (d < 0) { snprintf(out, sz, "channel: no such channel '%s'", argv[1]); return ERR_NOT_FOUND; }
+    snprintf(out, sz, "channel '%s': %d queued", argv[1], d);
+    return ERR_OK;
+}
+
 static int cmd_pause(char *out, int sz, int argc, char **argv) {
     for (int i=0; i<MAX_MONADS; i++) {
         if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
@@ -4244,7 +4255,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"version", cmd_version}, {"boot", cmd_boot}, {"hw", cmd_hw},
     {"devices", cmd_devices}, {"gpu", cmd_gpu}, {"mem", cmd_mem},
     {"mmap", cmd_mmap}, {"alloc", cmd_alloc}, {"free", cmd_free},
-    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"numb", cmd_numb}, {"feel", cmd_feel}, {"mood", cmd_mood}, {"pause", cmd_pause}, {"send", cmd_send},
+    {"ps", cmd_ps}, {"run", cmd_run}, {"fork", cmd_fork}, {"kill", cmd_kill}, {"sleep", cmd_sleep}, {"wait", cmd_wait}, {"open", cmd_open}, {"close", cmd_close}, {"readfd", cmd_readfd}, {"writefd", cmd_writefd}, {"yield", cmd_yield}, {"fds", cmd_fds}, {"dup", cmd_dup}, {"nice", cmd_nice}, {"slice", cmd_slice}, {"limit", cmd_limit}, {"climit", cmd_climit}, {"current", cmd_current}, {"signal", cmd_signal}, {"numb", cmd_numb}, {"feel", cmd_feel}, {"mood", cmd_mood}, {"channel", cmd_channel}, {"pause", cmd_pause}, {"send", cmd_send},
     {"tick", cmd_tick}, {"status", cmd_status}, {"pwd", cmd_pwd},
     {"cd", cmd_cd}, {"ls", cmd_ls}, {"cat", cmd_cat},
     {"touch", cmd_touch}, {"write", cmd_write}, {"append", cmd_append},

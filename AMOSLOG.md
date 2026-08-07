@@ -15,6 +15,38 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-07 — A monad can look at a channel before it reads one
+
+The previous entry shipped talking monads with a hazard stated but unguarded: a monad reading an
+empty channel froze the whole kernel while `am_channel_read` polled. The canon now has the two
+calls a scheduling host needs (`am_channel_try_read`, `am_channel_depth`, and the `CHANNEL TRY` /
+`CHANNEL DEPTH` directives — `ariannamethod.ai` `ded407c`), re-vendored here.
+
+- **`channel`** reports the number of active channels; **`channel <name>`** reports its depth,
+  and refuses a name that does not exist rather than answering 0 — the difference between "empty"
+  and "absent" is exactly what a monad's author needs to see.
+- The shipped reader `runtime/talk_read.aml` now uses `CHANNEL TRY`. Same conversation, same
+  value crossing (`tension 0.688`), no stall.
+
+**Measured, same reader, empty bus:** `CHANNEL READ` **1.32 s** wall versus `CHANNEL TRY`
+**0.02 s** — sixty times.
+
+### Verification
+- `channel bus` reads `1 queued` after the writer and `0 queued` after the reader took the value;
+  `channel nosuch` refuses; the two monads still talk.
+- The stall guard runs the probe three times and requires under 2 s. Falsified: switching the
+  probe to `CHANNEL READ` fails it with `4s for 3 runs`.
+- **The guard was empty on its first two attempts, and falsification caught both.** The first
+  timed the shipped reader — but each treaty case is a fresh process where the channel was never
+  created, and `am_channel_read` returns *immediately* on a **missing** channel; only an existing
+  empty one polls. So the probe now creates the channel itself. This is the fifth empty test in
+  this arc, all the same shape: an assertion that cannot distinguish the two cases it exists to
+  separate. A test that has never been run against a deliberately broken build is decoration.
+- Selftest **60/60**; shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0** on the
+  channel paths.
+
+---
+
 ## 2026-08-02 — Two monads talk: AML channels cross the boundary between citizens
 
 Until now a monad could only shout into the shared field or drop text in a mailbox. The language

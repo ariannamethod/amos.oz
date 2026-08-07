@@ -92,6 +92,17 @@ out=$(run "run $ROOT/runtime/talk_write.aml" 'tick' 'tick' "run $ROOT/runtime/ta
 echo "$out" | grep -q 'AML monad' || { echo "FAIL: talking monads did not open"; exit 1; }
 if echo "$out" | grep -qE 'tension 0\.000'; then echo "FAIL: the value did not cross between monads"; exit 1; fi
 
+out=$(run "run $ROOT/runtime/talk_write.aml" 'tick' 'tick' 'channel bus')
+echo "$out" | grep -q "channel 'bus': 1 queued" || { echo "FAIL: channel depth does not follow a write"; exit 1; }
+
+# Reading an EXISTING but empty channel is what stalls: am_channel_read polls ~1.3 s, while a
+# missing channel returns at once. The probe therefore creates the channel itself, then reads
+# it empty — three runs take hundredths with CHANNEL TRY and seconds with CHANNEL READ.
+t0=$(date +%s)
+for _ in 1 2 3; do run "run $ROOT/runtime/probe_empty.aml" "tick" "tick" >/dev/null; done
+t1=$(date +%s)
+[ $((t1 - t0)) -lt 2 ] || { echo "FAIL: reading an empty bus stalls the kernel ($((t1-t0))s for 3 runs)"; exit 1; }
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 

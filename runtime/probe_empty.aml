@@ -1,0 +1,3 @@
+CHANNEL CREATE probe 8
+CHANNEL TRY probe v
+TENSION v
