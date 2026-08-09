@@ -55,7 +55,7 @@ Core OS primitives (AMOS body):
 | Scheduler / Resources | `nice`, `slice`, `limit`, `climit` (cpu + mem hard limits + violations) |
 | Shell / IPC | `echo`, `env`, `set`, `unset`, `export`, `source`, `history`, `which`, `exec`, `test`, `send` (mailbox IPC) |
 | Logic / Syscall | `true`, `false`, `syscall` |
-| OZ / Meta | `oz`, `slots`, `modules`, `overhead`, `hooks`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
+| OZ / Meta | `oz`, `slots`, `organs`, `overhead`, `pulses`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
 | Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program becomes a monad, sliced `max_slice` statements per quantum — `slice <pid> N` tunes it), `mood <pid> [dim value]` (the monad's own weather — pain/tension/flow/warmth — weighed by the shared emergence) |
 | Persist | `save`, `load` |
 
@@ -69,11 +69,11 @@ Core OS primitives (AMOS body):
 - Signals: delivery in tick, STOP/CONT/TERM/KILL + unblock on signal. **Numbness** (`numb` / `feel`) is the mask in this system's own register: a numbed signal is not lost, it stays pending until the monad feels again. Numbness is a property of the monad and outlives delivery; KILL and STOP pierce it.
 - Fork: full clone of cwd/fds/limits/priority/numbness/owned + child reset (signals/cpu_time/violations/slice=0). Exec: name replace + reset signals/numbness/sleep/slice/violations, keeps fds/cwd.
 - Rich /proc: top-level (uptime,meminfo,cpuinfo,version,self/status) + per-pid /status /fd /cpu /mem /stat /mailbox.
-- Ring ledger (head/count, last 256).
+- Ring wake — the trace every command leaves (head/count, last 256).
 - current_pid + shell_pid context everywhere (prompt, pwd, resolve, ownership, parent in spawn/fork/wait/exec, fg sticks via suppress).
 - Auto time advance (main) + manual `tick`; fg suppresses auto-tick.
 
-**OZ (field)** — the extension layer (modules, slots, hooks, contracts, ledger provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `monad_choose` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
+**OZ (field)** — the extension layer (organs, slots, pulses, contracts, wake provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `monad_choose` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
 
 ## Selftest (60/60)
 
@@ -81,7 +81,7 @@ Core OS primitives (AMOS body):
 make test
 ```
 
-Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), scheduler (slices, priorities, cpu limits, preemption), signals, devices, /proc, ledger (ring), memory accounting, shell treaty.
+Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), scheduler (slices, priorities, cpu limits, preemption), signals, devices, /proc, wake (ring), memory accounting, shell treaty.
 
 ## Parity Status
 
@@ -100,7 +100,7 @@ Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), sched
 - Lifecycle: fork (full clone), exec (replace), wait, kill, blocking (sleep/pause).
 - Signals + numbness (`numb` / `feel`) + delivery.
 - Devices (null/zero/full/random/urandom/tty + unified read/write) + rich /proc/<pid>/* .
-- Ring ledger + IPC mailbox (send).
+- Ring wake + IPC mailbox (send).
 - Current context everywhere: current_pid + shell_pid for ownership/parent/prompt/cwd in all paths; strict no-fallback mem.
 - All in **one self-contained C file**.
 
@@ -127,7 +127,7 @@ it actually runs, and what it moves in the shared field accumulates into its own
 
 > amosOZ's shell treaty sets its own rules; POSIX supplies the vocabulary, not the compliance target.  
 > Every command leaves a trace — ring-buffered, last 256.  
-> OZ begins where an extension has to prove itself: modules, hooks, contracts, ledger provenance.  
+> OZ begins where an extension has to prove itself: organs, pulses, contracts, wake provenance.  
 > Foundation first.
 
 ## License
