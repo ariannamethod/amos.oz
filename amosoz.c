@@ -51,15 +51,15 @@ static inline int safe_append(char *buf, int offset, int bufsz, const char *fmt,
 #define MAX_FILES 512
 #define MAX_BLOCKS 256
 #define MAX_MONADS 64
-#define MAX_MODULES 32
+#define MAX_ORGANS 32
 #define MAX_ENV 64
 #define MAX_HISTORY 100
-#define MAX_LEDGER 256
+#define MAX_WAKE 256
 #define MAX_SLOTS 16
 #define MAX_SLOT_OCCUPANTS 8
 #define MAX_DEVICES 16
-#define MAX_HOOKS 8
-#define MAX_HOOK_SUBS 8
+#define MAX_PULSES 8
+#define MAX_PULSE_LISTENERS 8
 #define MAX_CMD_LEN 1024
 #define MAX_PIPE_PARTS 8
 #define MEM_TOTAL_KB 65536
@@ -169,7 +169,7 @@ typedef struct {
     int sched_next;  /* round-robin scheduler pointer for real OS feel */
 } MonadTable;
 
-/* ─── OZ Ledger ───────────────────────────────────────────────────────────── */
+/* ─── OZ Wake ─────────────────────────────────────────────────────────────── */
 /* "Every command leaves a trace." */
 typedef struct {
     char command[MAX_CMD_LEN];
@@ -185,15 +185,15 @@ typedef struct {
     char undo_content[MAX_CONTENT];
     int undo_is_dir;
     int undo_was_create;
-} LedgerEntry;
+} WakeEntry;
 
 typedef struct {
-    LedgerEntry entries[MAX_LEDGER];
+    WakeEntry entries[MAX_WAKE];
     int head;   /* oldest entry index for ring buffer */
     int count;  /* current number of valid entries (0..MAX) */
-} OZLedger;
+} Wake;
 
-/* ─── Module System ───────────────────────────────────────────────────────── */
+/* ─── Organ System ───────────────────────────────────────────────────────── */
 /* "A slot is a promise with a boundary." */
 typedef struct {
     char name[32];
@@ -202,15 +202,15 @@ typedef struct {
     int cmd_count;
     char slots[4][32];
     int slot_count;
-    char hooks[4][16];
-    int hook_count;
+    char pulses[4][16];
+    int pulse_count;
     char contract_provides[4][32];
     int provides_count;
     char contract_requires[4][32];
     int requires_count;
     char contract_version[8];
     int loaded;
-} Module;
+} Organ;
 
 /* ─── Slots ───────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -219,12 +219,12 @@ typedef struct {
     int occupant_count;
 } Slot;
 
-/* ─── Hooks ───────────────────────────────────────────────────────────────── */
+/* ─── Pulses ──────────────────────────────────────────────────────────────── */
 typedef struct {
     char name[16];
-    char subscribers[MAX_HOOK_SUBS][32];
-    int sub_count;
-} Hook;
+    char listeners[MAX_PULSE_LISTENERS][32];
+    int listener_count;
+} Pulse;
 
 /* ─── Devices ─────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -246,13 +246,13 @@ typedef struct {
     VirtualMemory mem;
     VirtualFS fs;
     MonadTable monads;
-    OZLedger ledger;
-    Module modules[MAX_MODULES];
-    int module_count;
+    Wake wake;
+    Organ organs[MAX_ORGANS];
+    int organ_count;
     Slot slots[MAX_SLOTS];
     int slot_count;
-    Hook hooks[MAX_HOOKS];
-    int hook_count;
+    Pulse pulses[MAX_PULSES];
+    int pulse_count;
     Device devices[MAX_DEVICES];
     int device_count;
     EnvVar env[MAX_ENV];
@@ -263,8 +263,8 @@ typedef struct {
     char user[16];
     int running;
     int fortune_idx;
-    int hook_boot_fired;
-    int hook_sched_fired;
+    int pulse_boot_fired;
+    int pulse_sched_fired;
     char boot_log[1024];
     int job_count;
     char fortune_oz_idx;
@@ -283,27 +283,27 @@ typedef struct {
     char undo_content[MAX_CONTENT];
     int undo_is_dir;
     int undo_was_create;
-} LedgerMeta;
+} WakeMeta;
 
-static LedgerMeta pending_ledger;
+static WakeMeta pending_wake;
 
 #define MAX_SCRIPT_DEPTH 8
 static char shell_stdin_buf[MAX_CONTENT];
 static int shell_stdin_len;
 static int shell_depth;
 
-static void ledger_meta_clear(void) { memset(&pending_ledger, 0, sizeof(pending_ledger)); }
+static void wake_meta_clear(void) { memset(&pending_wake, 0, sizeof(pending_wake)); }
 
-static void ledger_meta_set(int reversible, const char *explanation,
+static void wake_meta_set(int reversible, const char *explanation,
                             const char *undo_path, const char *undo_content,
                             int undo_is_dir, int undo_was_create) {
-    pending_ledger.active = 1;
-    pending_ledger.reversible = reversible;
-    snprintf(pending_ledger.explanation, sizeof(pending_ledger.explanation), "%s", explanation);
-    if (undo_path) strncpy(pending_ledger.undo_path, undo_path, MAX_PATH-1);
-    if (undo_content) strncpy(pending_ledger.undo_content, undo_content, MAX_CONTENT-1);
-    pending_ledger.undo_is_dir = undo_is_dir;
-    pending_ledger.undo_was_create = undo_was_create;
+    pending_wake.active = 1;
+    pending_wake.reversible = reversible;
+    snprintf(pending_wake.explanation, sizeof(pending_wake.explanation), "%s", explanation);
+    if (undo_path) strncpy(pending_wake.undo_path, undo_path, MAX_PATH-1);
+    if (undo_content) strncpy(pending_wake.undo_content, undo_content, MAX_CONTENT-1);
+    pending_wake.undo_is_dir = undo_is_dir;
+    pending_wake.undo_was_create = undo_was_create;
 }
 
 /* ─── Forward declarations ────────────────────────────────────────────────── */
@@ -311,9 +311,9 @@ static void kernel_init(void);
 static int dispatch(const char *line, char *output, int outsize);
 static int kernel_syscall(const char *op, char *out, int outsz, int argc, char **argv);
 static void proc_refresh_all(void);
-static int fire_hook(const char *hook_name);
+static int galvanize(const char *pulse_name);
 static int fs_access(const FSNode *n, const char *user, char op);
-static int validate_module_contracts(void);
+static int organ_validate_contracts(void);
 static int fs_find(VirtualFS *fs, const char *path);
 static int fs_add_dir(VirtualFS *fs, const char *path);
 static int fs_add_file(VirtualFS *fs, const char *path, const char *content);
@@ -1399,22 +1399,22 @@ static int monad_tick(MonadTable *pt) {
     return pt->tick_count;
 }
 
-/* ─── OZ Ledger ───────────────────────────────────────────────────────────── */
-static void ledger_init(OZLedger *l) { memset(l, 0, sizeof(OZLedger)); l->head = 0; l->count = 0; }
+/* ─── OZ Wake ─────────────────────────────────────────────────────────────── */
+static void wake_init(Wake *l) { memset(l, 0, sizeof(Wake)); l->head = 0; l->count = 0; }
 
-static void ledger_record_ex(OZLedger *l, const char *cmd, const char *pcmd, const char *pargs,
+static void wake_record(Wake *l, const char *cmd, const char *pcmd, const char *pargs,
                              const char *actor, int tick, int result, const char *explanation,
                              int reversible, const char *undo_path, const char *undo_content,
                              int undo_is_dir, int undo_was_create) {
     int idx;
-    if (l->count < MAX_LEDGER) {
-        idx = (l->head + l->count) % MAX_LEDGER;
+    if (l->count < MAX_WAKE) {
+        idx = (l->head + l->count) % MAX_WAKE;
         l->count++;
     } else {
         idx = l->head;
-        l->head = (l->head + 1) % MAX_LEDGER;
+        l->head = (l->head + 1) % MAX_WAKE;
     }
-    LedgerEntry *e = &l->entries[idx];
+    WakeEntry *e = &l->entries[idx];
     strncpy(e->command, cmd, MAX_CMD_LEN-1);
     strncpy(e->parsed_cmd, pcmd ? pcmd : "", 31);
     strncpy(e->parsed_args, pargs ? pargs : "", 255);
@@ -1430,13 +1430,13 @@ static void ledger_record_ex(OZLedger *l, const char *cmd, const char *pcmd, con
     e->undo_was_create = undo_was_create;
 }
 
-/* ─── Module System ───────────────────────────────────────────────────────── */
+/* ─── Organ System ───────────────────────────────────────────────────────── */
 /* "OZ begins where extension becomes accountable." */
 static void init_builtin_slots(void) {
     const char *slot_names[] = {
-        "shell.commands", "fs.drivers", "devices", "ai.hooks",
-        "sched.hooks", "boot.hooks", "diagnostics", "experiments",
-        "oz.contracts", "oz.ledger"
+        "shell.commands", "fs.drivers", "devices", "ai.pulses",
+        "sched.pulses", "boot.pulses", "diagnostics", "experiments",
+        "oz.contracts", "oz.wake"
     };
     K.slot_count = 10;
     for (int i = 0; i < 10; i++) {
@@ -1445,12 +1445,12 @@ static void init_builtin_slots(void) {
     }
 }
 
-static void init_hooks(void) {
-    const char *hook_names[] = {"boot", "sched", "ai", "diag", "experiment"};
-    K.hook_count = 5;
+static void pulse_init(void) {
+    const char *pulse_names[] = {"boot", "sched", "ai", "diag", "experiment"};
+    K.pulse_count = 5;
     for (int i = 0; i < 5; i++) {
-        memset(&K.hooks[i], 0, sizeof(Hook));
-        strcpy(K.hooks[i].name, hook_names[i]);
+        memset(&K.pulses[i], 0, sizeof(Pulse));
+        strcpy(K.pulses[i].name, pulse_names[i]);
     }
 }
 
@@ -1460,22 +1460,22 @@ static int find_slot(const char *name) {
     return -1;
 }
 
-static int find_hook(const char *name) {
-    for (int i = 0; i < K.hook_count; i++)
-        if (strcmp(K.hooks[i].name, name) == 0) return i;
+static int pulse_find(const char *name) {
+    for (int i = 0; i < K.pulse_count; i++)
+        if (strcmp(K.pulses[i].name, name) == 0) return i;
     return -1;
 }
 
-static void register_module(const char *name, const char *desc,
+static void organ_register(const char *name, const char *desc,
                             const char *cmds[], int ncmds,
                             const char *mslots[], int nslots,
                             const char *mhooks[], int nhooks,
                             const char *provides[], int nprov,
                             const char *requires[], int nreq,
                             const char *ver) {
-    if (K.module_count >= MAX_MODULES) return;
-    Module *m = &K.modules[K.module_count++];
-    memset(m, 0, sizeof(Module));
+    if (K.organ_count >= MAX_ORGANS) return;
+    Organ *m = &K.organs[K.organ_count++];
+    memset(m, 0, sizeof(Organ));
     strncpy(m->name, name, 31);
     strncpy(m->description, desc, 63);
     m->cmd_count = ncmds;
@@ -1488,12 +1488,12 @@ static void register_module(const char *name, const char *desc,
             strcpy(K.slots[si].occupants[K.slots[si].occupant_count++], name);
         }
     }
-    m->hook_count = nhooks;
+    m->pulse_count = nhooks;
     for (int i = 0; i < nhooks && i < 4; i++) {
-        strncpy(m->hooks[i], mhooks[i], 15);
-        int hi = find_hook(mhooks[i]);
-        if (hi >= 0 && K.hooks[hi].sub_count < MAX_HOOK_SUBS) {
-            strcpy(K.hooks[hi].subscribers[K.hooks[hi].sub_count++], name);
+        strncpy(m->pulses[i], mhooks[i], 15);
+        int hi = pulse_find(mhooks[i]);
+        if (hi >= 0 && K.pulses[hi].listener_count < MAX_PULSE_LISTENERS) {
+            strcpy(K.pulses[hi].listeners[K.pulses[hi].listener_count++], name);
         }
     }
     m->provides_count = nprov;
@@ -1504,10 +1504,10 @@ static void register_module(const char *name, const char *desc,
     m->loaded = 1;
 }
 
-static int unload_module(const char *name) {
-    for (int i = 0; i < K.module_count; i++) {
-        if (K.modules[i].loaded && strcmp(K.modules[i].name, name) == 0) {
-            K.modules[i].loaded = 0;
+static int organ_unload(const char *name) {
+    for (int i = 0; i < K.organ_count; i++) {
+        if (K.organs[i].loaded && strcmp(K.organs[i].name, name) == 0) {
+            K.organs[i].loaded = 0;
             /* Remove from slots */
             for (int s = 0; s < K.slot_count; s++) {
                 for (int o = 0; o < K.slots[s].occupant_count; o++) {
@@ -1519,13 +1519,13 @@ static int unload_module(const char *name) {
                     }
                 }
             }
-            /* Remove from hooks */
-            for (int h = 0; h < K.hook_count; h++) {
-                for (int o = 0; o < K.hooks[h].sub_count; o++) {
-                    if (strcmp(K.hooks[h].subscribers[o], name) == 0) {
-                        for (int k = o; k < K.hooks[h].sub_count-1; k++)
-                            strcpy(K.hooks[h].subscribers[k], K.hooks[h].subscribers[k+1]);
-                        K.hooks[h].sub_count--;
+            /* Remove from pulses */
+            for (int h = 0; h < K.pulse_count; h++) {
+                for (int o = 0; o < K.pulses[h].listener_count; o++) {
+                    if (strcmp(K.pulses[h].listeners[o], name) == 0) {
+                        for (int k = o; k < K.pulses[h].listener_count-1; k++)
+                            strcpy(K.pulses[h].listeners[k], K.pulses[h].listeners[k+1]);
+                        K.pulses[h].listener_count--;
                         break;
                     }
                 }
@@ -1542,42 +1542,42 @@ static int slot_is_occupied(const char *slot_name) {
     return K.slots[si].occupant_count > 0;
 }
 
-static int validate_module_contracts(void) {
-    for (int i = 0; i < K.module_count; i++) {
-        if (!K.modules[i].loaded) continue;
-        for (int j = 0; j < K.modules[i].requires_count; j++) {
-            const char *req = K.modules[i].contract_requires[j];
+static int organ_validate_contracts(void) {
+    for (int i = 0; i < K.organ_count; i++) {
+        if (!K.organs[i].loaded) continue;
+        for (int j = 0; j < K.organs[i].requires_count; j++) {
+            const char *req = K.organs[i].contract_requires[j];
             if (!slot_is_occupied(req)) return ERR_MODULE;
         }
     }
     return ERR_OK;
 }
 
-static int fire_hook(const char *hook_name) {
-    int hi = find_hook(hook_name);
+static int galvanize(const char *pulse_name) {
+    int hi = pulse_find(pulse_name);
     if (hi < 0) return 0;
-    return K.hooks[hi].sub_count;
+    return K.pulses[hi].listener_count;
 }
 
-static void init_builtin_modules(void) {
+static void organ_init_builtin(void) {
     { const char *c[]={"uptime"}; const char *s[]={"shell.commands"};
       const char *h[]={NULL}; const char *p[]={"uptime"}; const char *r[]={NULL};
-      register_module("coreutils","Core utilities",c,1,s,1,h,0,p,1,r,0,"0.1"); }
+      organ_register("coreutils","Core utilities",c,1,s,1,h,0,p,1,r,0,"0.1"); }
     { const char *c[]={"hwinfo"}; const char *s[]={"diagnostics"};
       const char *h[]={"boot"}; const char *p[]={"hwinfo"}; const char *r[]={NULL};
-      register_module("hwprobe","Hardware probe",c,1,s,1,h,1,p,1,r,0,"0.1"); }
+      organ_register("hwprobe","Hardware probe",c,1,s,1,h,1,p,1,r,0,"0.1"); }
     { const char *c[]={"diag_status"}; const char *s[]={"diagnostics"};
       const char *h[]={"diag"}; const char *p[]={"diag_status"}; const char *r[]={NULL};
-      register_module("diag","Diagnostics",c,1,s,1,h,1,p,1,r,0,"0.1"); }
-    { const char *c[]={"ai_status"}; const char *s[]={"ai.hooks"};
-      const char *h[]={"ai"}; const char *p[]={"ai_status","intent_hints"}; const char *r[]={"oz.ledger"};
-      register_module("ai_seed","AI seed hooks",c,1,s,1,h,1,p,2,r,1,"0.1"); }
-    { const char *c[]={"ledger_size"}; const char *s[]={"oz.ledger","oz.contracts"};
-      const char *h[]={"ai"}; const char *p[]={"ledger_size","trace","replay"}; const char *r[]={NULL};
-      register_module("oz_ledger","OZ Ledger provenance",c,1,s,2,h,1,p,3,r,0,"0.1"); }
+      organ_register("diag","Diagnostics",c,1,s,1,h,1,p,1,r,0,"0.1"); }
+    { const char *c[]={"ai_status"}; const char *s[]={"ai.pulses"};
+      const char *h[]={"ai"}; const char *p[]={"ai_status","intent_hints"}; const char *r[]={"oz.wake"};
+      organ_register("ai_seed","AI seed pulses",c,1,s,1,h,1,p,2,r,1,"0.1"); }
+    { const char *c[]={"wake_size"}; const char *s[]={"oz.wake","oz.contracts"};
+      const char *h[]={"ai"}; const char *p[]={"wake_size","trace","replay"}; const char *r[]={NULL};
+      organ_register("oz_wake","OZ wake provenance",c,1,s,2,h,1,p,3,r,0,"0.1"); }
     { const char *c[]={"fortune"}; const char *s[]={"shell.commands","experiments"};
       const char *h[]={"experiment"}; const char *p[]={"fortune"}; const char *r[]={NULL};
-      register_module("fortune_ext","Example extension: fortune",c,1,s,2,h,1,p,1,r,0,"0.1"); }
+      organ_register("fortune_ext","Example extension: fortune",c,1,s,2,h,1,p,1,r,0,"0.1"); }
 }
 
 /* ─── Devices ─────────────────────────────────────────────────────────────── */
@@ -1685,10 +1685,10 @@ static void kernel_init(void) {
     fs_init(&K.fs);
     fs_init_tree(&K.fs);
     monad_table_init(&K.monads);
-    ledger_init(&K.ledger);
+    wake_init(&K.wake);
     init_builtin_slots();
-    init_hooks();
-    init_builtin_modules();
+    pulse_init();
+    organ_init_builtin();
     init_devices();
     slot_manifest_load("runtime/slots.tsv");
     am_init();  /* boot the AML resonance field (the continuous substrate) */
@@ -1709,19 +1709,19 @@ static void kernel_init(void) {
     monad_spawn(&K.monads, "init", 0);
     int sh = monad_spawn(&K.monads, "amossh", 1);  /* init is parent */
 
-    K.hook_boot_fired = fire_hook("boot");
-    K.hook_sched_fired = 0;
+    K.pulse_boot_fired = galvanize("boot");
+    K.pulse_sched_fired = 0;
     K.job_count = 1;
     K.fortune_oz_idx = 0;
     K.shell_pid = sh > 0 ? sh : 2;
     K.current_pid = sh > 0 ? sh : 1;
     K.suppress_next_auto_tick = 0;
     snprintf(K.boot_log, sizeof(K.boot_log),
-        "[boot] amosOZ %s started\n[boot] %d hook subscribers on boot\n"
+        "[boot] amosOZ %s started\n[boot] %d pulse listeners on boot\n"
         "[boot] dedicated to Amos Oz (עוז)\n",
-        VERSION, K.hook_boot_fired);
+        VERSION, K.pulse_boot_fired);
     proc_refresh_all();
-    (void)validate_module_contracts();
+    (void)organ_validate_contracts();
 }
 
 /* ─── Syscall Layer ───────────────────────────────────────────────────────── */
@@ -1909,9 +1909,9 @@ static int cmd_help(char *out, int sz, int argc, char **argv) {
     snprintf(out, sz,
         "amosOZ commands:\n"
         "  alloc append boot call cat cd chmod clear contracts cp date\n"
-        "  devices echo env exit fortune free help history hooks hw\n"
-        "  exec fortune free help history hooks hw kill load loadmod ls mem\n"
-        "  mkdir mmap modules motd mv overhead oz ps pwd replay rm rmdir\n"
+        "  devices echo env exit fortune free help history pulses hw\n"
+        "  exec fortune free help history pulses hw kill load loadmod ls mem\n"
+        "  mkdir mmap organs motd mv overhead oz ps pwd replay rm rmdir\n"
         "  run save selftest set slots syscall stat status tick touch trace\n"
         "  tree undo uname unloadmod unset version which whoami write\n"
         "  Shell: > >> |  Scripts: #!/amossh .amos  PATH:/bin");
@@ -2511,7 +2511,7 @@ static int cmd_current(char *out, int sz, int argc, char **argv) {
 
 static int cmd_tick(char *out, int sz, int argc, char **argv) {
     int t = monad_tick(&K.monads);
-    K.hook_sched_fired += fire_hook("sched");
+    K.pulse_sched_fired += galvanize("sched");
     proc_refresh_all();
 
     /* find who is currently running thanks to the scheduler */
@@ -2525,7 +2525,7 @@ static int cmd_tick(char *out, int sz, int argc, char **argv) {
             break;
         }
     }
-    snprintf(out, sz, "Tick: %d running=%s (sched hooks: %d)", t, running, K.hook_sched_fired);
+    snprintf(out, sz, "Tick: %d running=%s (pulses: %d)", t, running, K.pulse_sched_fired);
     return ERR_OK;
 }
 
@@ -2674,7 +2674,7 @@ static int cmd_write(char *out, int sz, int argc, char **argv) {
     for (int i = 0; i < wargc; i++) wargv[i] = argv[i + 1];
     int err = kernel_syscall("write", out, sz, wargc, wargv);
     if (err == ERR_OK)
-        ledger_meta_set(1, "fs write", resolved, old_content, 0, was_create);
+        wake_meta_set(1, "fs write", resolved, old_content, 0, was_create);
     else if (strcmp(resolved, "/dev/full") == 0)
         snprintf(out, sz, "write: %s: no space left on device", argv[1]);
     out[0] = '\0';
@@ -2719,7 +2719,7 @@ static int cmd_rm(char *out, int sz, int argc, char **argv) {
     char backup[MAX_CONTENT];
     strncpy(backup, K.fs.nodes[idx].content, MAX_CONTENT-1);
     K.fs.nodes[idx].used = 0;
-    ledger_meta_set(1, "fs delete", resolved, backup, 0, 0);
+    wake_meta_set(1, "fs delete", resolved, backup, 0, 0);
     out[0] = '\0';
     return ERR_OK;
 }
@@ -2884,16 +2884,16 @@ static int cmd_history(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_oz(char *out, int sz, int argc, char **argv) {
-    int mod_count = 0, hook_count = 0;
-    for (int i = 0; i < K.module_count; i++) if (K.modules[i].loaded) mod_count++;
-    for (int i = 0; i < K.hook_count; i++) hook_count += K.hooks[i].sub_count;
+    int mod_count = 0, pulse_count = 0;
+    for (int i = 0; i < K.organ_count; i++) if (K.organs[i].loaded) mod_count++;
+    for (int i = 0; i < K.pulse_count; i++) pulse_count += K.pulses[i].listener_count;
     int contract_count = 0;
-    for (int i = 0; i < K.module_count; i++) if (K.modules[i].loaded) contract_count++;
+    for (int i = 0; i < K.organ_count; i++) if (K.organs[i].loaded) contract_count++;
     snprintf(out, sz,
         "OZ Layer — Extensibility Field\n"
-        "  Modules loaded: %d\n  Slots defined: %d\n"
-        "  Hooks active: %d\n  Contracts: %d\n  Ledger entries: %d",
-        mod_count, K.slot_count, hook_count, contract_count, K.ledger.count);
+        "  Organs loaded: %d\n  Slots defined: %d\n"
+        "  Pulses active: %d\n  Contracts: %d\n  Wake entries: %d",
+        mod_count, K.slot_count, pulse_count, contract_count, K.wake.count);
     return ERR_OK;
 }
 
@@ -2912,12 +2912,12 @@ static int cmd_slots(char *out, int sz, int argc, char **argv) {
 
 static int cmd_modules(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    n = safe_append(out, n, sz, "Modules:\n");
-    for (int i = 0; i < K.module_count; i++) {
-        if (!K.modules[i].loaded) continue;
-        n = safe_append(out, n, sz, "  %s: %s [commands:", K.modules[i].name, K.modules[i].description);
-        for (int j = 0; j < K.modules[i].cmd_count; j++)
-            n = safe_append(out, n, sz, " %s", K.modules[i].commands[j]);
+    n = safe_append(out, n, sz, "Organs:\n");
+    for (int i = 0; i < K.organ_count; i++) {
+        if (!K.organs[i].loaded) continue;
+        n = safe_append(out, n, sz, "  %s: %s [commands:", K.organs[i].name, K.organs[i].description);
+        for (int j = 0; j < K.organs[i].cmd_count; j++)
+            n = safe_append(out, n, sz, " %s", K.organs[i].commands[j]);
         n = safe_append(out, n, sz, "]\n");
     }
     return ERR_OK;
@@ -2925,34 +2925,34 @@ static int cmd_modules(char *out, int sz, int argc, char **argv) {
 
 static int cmd_overhead(char *out, int sz, int argc, char **argv) {
     int n = 0, total_dispatch = 0, total_hooks = 0, total_slots = 0, total_mods = 0;
-    for (int i = 0; i < K.module_count; i++) {
-        if (!K.modules[i].loaded) continue;
+    for (int i = 0; i < K.organ_count; i++) {
+        if (!K.organs[i].loaded) continue;
         total_mods++;
-        total_dispatch += K.modules[i].cmd_count;
-        total_hooks += K.modules[i].hook_count;
-        total_slots += K.modules[i].slot_count;
+        total_dispatch += K.organs[i].cmd_count;
+        total_hooks += K.organs[i].pulse_count;
+        total_slots += K.organs[i].slot_count;
     }
     n = safe_append(out, n, sz, "Overhead Accounting:\n");
-    n = safe_append(out, n, sz, "  Total modules: %d\n", total_mods);
+    n = safe_append(out, n, sz, "  Total organs: %d\n", total_mods);
     n = safe_append(out, n, sz, "  Total dispatch entries: %d\n", total_dispatch);
-    n = safe_append(out, n, sz, "  Total hooks: %d\n", total_hooks);
-    n = safe_append(out, n, sz, "  Total slot occupations: %d\n\nPer-module:\n", total_slots);
-    for (int i = 0; i < K.module_count; i++) {
-        if (!K.modules[i].loaded) continue;
-        n = safe_append(out, n, sz, "  %s: dispatch=%d hooks=%d slots=%d\n",
-            K.modules[i].name, K.modules[i].cmd_count, K.modules[i].hook_count, K.modules[i].slot_count);
+    n = safe_append(out, n, sz, "  Total pulses: %d\n", total_hooks);
+    n = safe_append(out, n, sz, "  Total slot occupations: %d\n\nPer-organ:\n", total_slots);
+    for (int i = 0; i < K.organ_count; i++) {
+        if (!K.organs[i].loaded) continue;
+        n = safe_append(out, n, sz, "  %s: dispatch=%d pulses=%d slots=%d\n",
+            K.organs[i].name, K.organs[i].cmd_count, K.organs[i].pulse_count, K.organs[i].slot_count);
     }
     return ERR_OK;
 }
 
 static int cmd_hooks(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    n = safe_append(out, n, sz, "Hooks:\n");
-    for (int i = 0; i < K.hook_count; i++) {
-        n = safe_append(out, n, sz, "  %s: ", K.hooks[i].name);
-        if (K.hooks[i].sub_count == 0) n = safe_append(out, n, sz, "(none)");
-        else for (int j = 0; j < K.hooks[i].sub_count; j++)
-            n = safe_append(out, n, sz, "%s%s", j?", ":"", K.hooks[i].subscribers[j]);
+    n = safe_append(out, n, sz, "Pulses:\n");
+    for (int i = 0; i < K.pulse_count; i++) {
+        n = safe_append(out, n, sz, "  %s: ", K.pulses[i].name);
+        if (K.pulses[i].listener_count == 0) n = safe_append(out, n, sz, "(none)");
+        else for (int j = 0; j < K.pulses[i].listener_count; j++)
+            n = safe_append(out, n, sz, "%s%s", j?", ":"", K.pulses[i].listeners[j]);
         n = safe_append(out, n, sz, "\n");
     }
     return ERR_OK;
@@ -2960,60 +2960,60 @@ static int cmd_hooks(char *out, int sz, int argc, char **argv) {
 
 static int cmd_contracts(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    n = safe_append(out, n, sz, "Module Contracts:\n");
-    for (int i = 0; i < K.module_count; i++) {
-        if (!K.modules[i].loaded) continue;
-        n = safe_append(out, n, sz, "  %s:\n    provides:", K.modules[i].name);
-        for (int j = 0; j < K.modules[i].provides_count; j++)
-            n = safe_append(out, n, sz, " %s", K.modules[i].contract_provides[j]);
+    n = safe_append(out, n, sz, "Organ Contracts:\n");
+    for (int i = 0; i < K.organ_count; i++) {
+        if (!K.organs[i].loaded) continue;
+        n = safe_append(out, n, sz, "  %s:\n    provides:", K.organs[i].name);
+        for (int j = 0; j < K.organs[i].provides_count; j++)
+            n = safe_append(out, n, sz, " %s", K.organs[i].contract_provides[j]);
         n = safe_append(out, n, sz, "\n    requires:");
-        for (int j = 0; j < K.modules[i].requires_count; j++)
-            n = safe_append(out, n, sz, " %s", K.modules[i].contract_requires[j]);
-        n = safe_append(out, n, sz, "\n    version: %s\n", K.modules[i].contract_version);
+        for (int j = 0; j < K.organs[i].requires_count; j++)
+            n = safe_append(out, n, sz, " %s", K.organs[i].contract_requires[j]);
+        n = safe_append(out, n, sz, "\n    version: %s\n", K.organs[i].contract_version);
     }
     return ERR_OK;
 }
 
 static int cmd_loadmod(char *out, int sz, int argc, char **argv) {
-    if (validate_module_contracts() != ERR_OK) {
+    if (organ_validate_contracts() != ERR_OK) {
         snprintf(out, sz, "loadmod: contract validation failed (missing required slots)");
         return ERR_MODULE;
     }
-    snprintf(out, sz, "loadmod: dynamic loading not supported in v%s (modules compiled-in; contracts OK)",
+    snprintf(out, sz, "loadmod: dynamic loading not supported in v%s (organs compiled-in; contracts OK)",
         VERSION);
     return ERR_OK;
 }
 
 static int cmd_unloadmod(char *out, int sz, int argc, char **argv) {
-    if (argc < 2) { snprintf(out, sz, "Usage: unloadmod <module_name>"); return ERR_INVALID; }
-    int err = unload_module(argv[1]);
-    if (err != ERR_OK) { snprintf(out, sz, "unloadmod: module '%s' not found", argv[1]); return err; }
-    snprintf(out, sz, "Unloaded module '%s'", argv[1]);
+    if (argc < 2) { snprintf(out, sz, "Usage: unloadmod <organ_name>"); return ERR_INVALID; }
+    int err = organ_unload(argv[1]);
+    if (err != ERR_OK) { snprintf(out, sz, "unloadmod: organ '%s' not found", argv[1]); return err; }
+    snprintf(out, sz, "Unloaded organ '%s'", argv[1]);
     return ERR_OK;
 }
 
 static int cmd_call(char *out, int sz, int argc, char **argv) {
-    if (argc < 3) { snprintf(out, sz, "Usage: call <module> <method>"); return ERR_INVALID; }
-    /* Simplified: just check if module exists */
-    for (int i = 0; i < K.module_count; i++) {
-        if (K.modules[i].loaded && strcmp(K.modules[i].name, argv[1]) == 0) {
+    if (argc < 3) { snprintf(out, sz, "Usage: call <organ> <method>"); return ERR_INVALID; }
+    /* Simplified: just check if the organ exists */
+    for (int i = 0; i < K.organ_count; i++) {
+        if (K.organs[i].loaded && strcmp(K.organs[i].name, argv[1]) == 0) {
             snprintf(out, sz, "Called %s.%s -> OK", argv[1], argv[2]);
             return ERR_OK;
         }
     }
-    snprintf(out, sz, "call: module '%s' not found", argv[1]);
+    snprintf(out, sz, "call: organ '%s' not found", argv[1]);
     return ERR_NOT_FOUND;
 }
 
 static int cmd_trace(char *out, int sz, int argc, char **argv) {
     int n = 0, count = 10;
     if (argc > 1) count = atoi(argv[1]);
-    if (K.ledger.count == 0) { snprintf(out, sz, "(no trace entries)"); return ERR_OK; }
-    n = safe_append(out, n, sz, "OZ Ledger Trace:\n");
-    int start = K.ledger.count > count ? K.ledger.count - count : 0;
-    for (int i = start; i < K.ledger.count; i++) {
-        int idx = (K.ledger.head + i) % MAX_LEDGER;
-        LedgerEntry *e = &K.ledger.entries[idx];
+    if (K.wake.count == 0) { snprintf(out, sz, "(no trace entries)"); return ERR_OK; }
+    n = safe_append(out, n, sz, "OZ Wake Trace:\n");
+    int start = K.wake.count > count ? K.wake.count - count : 0;
+    for (int i = start; i < K.wake.count; i++) {
+        int idx = (K.wake.head + i) % MAX_WAKE;
+        WakeEntry *e = &K.wake.entries[idx];
         n = safe_append(out, n, sz, "  [%d] %s -> %d (%s)\n",
             e->tick, e->command, e->result_code, e->explanation);
     }
@@ -3022,11 +3022,11 @@ static int cmd_trace(char *out, int sz, int argc, char **argv) {
 
 static int cmd_replay(char *out, int sz, int argc, char **argv) {
     int n = 0;
-    if (K.ledger.count == 0) { snprintf(out, sz, "(no replay data)"); return ERR_OK; }
+    if (K.wake.count == 0) { snprintf(out, sz, "(no replay data)"); return ERR_OK; }
     n = safe_append(out, n, sz, "Replay Log:\n");
-    for (int i = 0; i < K.ledger.count; i++) {
-        int idx = (K.ledger.head + i) % MAX_LEDGER;
-        LedgerEntry *e = &K.ledger.entries[idx];
+    for (int i = 0; i < K.wake.count; i++) {
+        int idx = (K.wake.head + i) % MAX_WAKE;
+        WakeEntry *e = &K.wake.entries[idx];
         n = safe_append(out, n, sz, "  tick=%d cmd=%s parsed=%s args=%s result=%d rev=%d\n",
             e->tick, e->command, e->parsed_cmd, e->parsed_args, e->result_code, e->reversible);
     }
@@ -3034,9 +3034,9 @@ static int cmd_replay(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_undo(char *out, int sz, int argc, char **argv) {
-    for (int i = K.ledger.count - 1; i >= 0; i--) {
-        int idx = (K.ledger.head + i) % MAX_LEDGER;
-        LedgerEntry *e = &K.ledger.entries[idx];
+    for (int i = K.wake.count - 1; i >= 0; i--) {
+        int idx = (K.wake.head + i) % MAX_WAKE;
+        WakeEntry *e = &K.wake.entries[idx];
         if (!e->reversible || e->result_code != ERR_OK) continue;
         if (e->undo_was_create) {
             int fidx = fs_find(&K.fs, e->undo_path);
@@ -3050,7 +3050,7 @@ static int cmd_undo(char *out, int sz, int argc, char **argv) {
         snprintf(out, sz, "Undid: %s (%s)", e->parsed_cmd, e->undo_path);
         return ERR_OK;
     }
-    snprintf(out, sz, "undo: nothing reversible in ledger");
+    snprintf(out, sz, "undo: nothing reversible in the wake");
     return ERR_NOT_FOUND;
 }
 
@@ -3424,7 +3424,7 @@ static int cmd_nohup(char *out, int sz, int argc, char **argv) {
 
 static int cmd_spec(char *out, int sz, int argc, char **argv) {
     snprintf(out, sz,
-        "amosOZ spec %s\nfeatures: permissions,syscall,/proc,ledger,undo,shell,scripts,PATH\n"
+        "amosOZ spec %s\nfeatures: permissions,syscall,/proc,wake,undo,shell,scripts,PATH\n"
         "shell: >,>>,|,<  text: grep,head,tail,wc,test  fs: ln,find  meta: export,source\n"
         "stubs: jobs,fg,nohup  oz: fortune oz, /usr/share/amosoz\nselftest: 45+  canonical: C\n",
         VERSION);
@@ -3435,10 +3435,10 @@ static int cmd_doctor(char *out, int sz, int argc, char **argv) {
     int issues = 0;
     int n = 0;
     n = safe_append(out, n, sz, "amosOZ doctor:\n");
-    if (validate_module_contracts() != ERR_OK) { n = safe_append(out, n, sz, "  [FAIL] contracts\n"); issues++; }
+    if (organ_validate_contracts() != ERR_OK) { n = safe_append(out, n, sz, "  [FAIL] contracts\n"); issues++; }
     else n = safe_append(out, n, sz, "  [OK] contracts\n");
-    if (K.hook_boot_fired <= 0) { n = safe_append(out, n, sz, "  [FAIL] boot hooks\n"); issues++; }
-    else n = safe_append(out, n, sz, "  [OK] boot hooks (%d)\n", K.hook_boot_fired);
+    if (K.pulse_boot_fired <= 0) { n = safe_append(out, n, sz, "  [FAIL] boot pulses\n"); issues++; }
+    else n = safe_append(out, n, sz, "  [OK] boot pulses (%d)\n", K.pulse_boot_fired);
     if (fs_find(&K.fs, "/proc/uptime") < 0) { n = safe_append(out, n, sz, "  [FAIL] /proc\n"); issues++; }
     else n = safe_append(out, n, sz, "  [OK] /proc\n");
     if (fs_find(&K.fs, "/usr/share/amosoz/quotes.txt") < 0) { n = safe_append(out, n, sz, "  [WARN] oz quotes\n"); }
@@ -3450,7 +3450,7 @@ static int cmd_doctor(char *out, int sz, int argc, char **argv) {
 static const char *fortunes[] = {
     "The system is the territory.",
     "Every overhead has a name.",
-    "A module is a guest with manners.",
+    "An organ is a guest with manners.",
     "Slots are finite; ambition is not.",
     "Trace everything. Regret nothing.",
 };
@@ -3529,9 +3529,9 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     CHECK("syscall_read", kernel_syscall("read", scbuf, sizeof(scbuf), 1, scargv) == ERR_OK
         && strstr(scbuf, "amosoz") != NULL);
 
-    /* Hooks + contracts */
-    CHECK("hook_boot_fired", K.hook_boot_fired > 0);
-    CHECK("contract_validation", validate_module_contracts() == ERR_OK);
+    /* Pulses + contracts */
+    CHECK("pulse_boot_fired", K.pulse_boot_fired > 0);
+    CHECK("contract_validation", organ_validate_contracts() == ERR_OK);
 
     /* current context */
     CHECK("current_pid_set", K.current_pid > 0);
@@ -3593,11 +3593,11 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     /* resource accounting */
     CHECK("ps_has_mem", 1); /* ps now includes mem */
 
-    /* Module registration */
+    /* Organ registration */
     int mod_found = 0;
-    for (int i = 0; i < K.module_count; i++)
-        if (K.modules[i].loaded && strcmp(K.modules[i].name, "coreutils") == 0) mod_found = 1;
-    CHECK("module_registered", mod_found);
+    for (int i = 0; i < K.organ_count; i++)
+        if (K.organs[i].loaded && strcmp(K.organs[i].name, "coreutils") == 0) mod_found = 1;
+    CHECK("organ_registered", mod_found);
 
     /* Slot occupation */
     int slot_occ = 0;
@@ -3607,24 +3607,24 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
 
     /* Overhead */
     int total_mods = 0;
-    for (int i = 0; i < K.module_count; i++) if (K.modules[i].loaded) total_mods++;
+    for (int i = 0; i < K.organ_count; i++) if (K.organs[i].loaded) total_mods++;
     CHECK("overhead_accounting", total_mods > 0);
 
     /* OZ layer */
     CHECK("oz_layer", K.slot_count == 10);
 
-    /* Ledger */
-    CHECK("oz_ledger", K.ledger.count > 0);
+    /* Wake */
+    CHECK("oz_wake", K.wake.count > 0);
     int parsed_ok = 0;
-    for (int i = 0; i < K.ledger.count; i++)
-        if (K.ledger.entries[i].parsed_cmd[0]) parsed_ok = 1;
-    CHECK("ledger_parsed", parsed_ok);
+    for (int i = 0; i < K.wake.count; i++)
+        if (K.wake.entries[i].parsed_cmd[0]) parsed_ok = 1;
+    CHECK("wake_parsed", parsed_ok);
 
     /* Undo path */
     dispatch("write /tmp/undo_me undo_payload", tmp, sizeof(tmp));
     dispatch("undo", tmp, sizeof(tmp));
     int undo_idx = fs_find(&K.fs, "/tmp/undo_me");
-    CHECK("ledger_undo", strstr(tmp, "Undid") != NULL || undo_idx < 0);
+    CHECK("wake_undo", strstr(tmp, "Undid") != NULL || undo_idx < 0);
 
     /* Phase 2: shell treaty */
     dispatch("echo treaty_redir > /tmp/shell_redir", tmp, sizeof(tmp));
@@ -4028,13 +4028,13 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
         strncat(pargs, argv[i], sizeof(pargs) - strlen(pargs) - 1);
     }
 
-    ledger_meta_clear();
-    (void)fire_hook("ai");
+    wake_meta_clear();
+    (void)galvanize("ai");
 
     if (strcmp(argv[0], "exit") == 0) {
         K.running = 0;
         snprintf(output, outsize, "Shutting down amosOZ.");
-        ledger_record_ex(&K.ledger, line ? line : "exit", "exit", pargs, K.user,
+        wake_record(&K.wake, line ? line : "exit", "exit", pargs, K.user,
             K.monads.tick_count, ERR_OK, "shutdown", 0, NULL, NULL, 0, 0);
         return ERR_OK;
     }
@@ -4042,15 +4042,15 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
     for (int i = 0; CMD_TABLE[i].name; i++) {
         if (strcmp(argv[0], CMD_TABLE[i].name) == 0) {
             int result = CMD_TABLE[i].func(output, outsize, argc, argv);
-            if (pending_ledger.active) {
-                ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
-                    K.monads.tick_count, result, pending_ledger.explanation,
-                    pending_ledger.reversible, pending_ledger.undo_path,
-                    pending_ledger.undo_content, pending_ledger.undo_is_dir,
-                    pending_ledger.undo_was_create);
-                ledger_meta_clear();
+            if (pending_wake.active) {
+                wake_record(&K.wake, line ? line : argv[0], argv[0], pargs, K.user,
+                    K.monads.tick_count, result, pending_wake.explanation,
+                    pending_wake.reversible, pending_wake.undo_path,
+                    pending_wake.undo_content, pending_wake.undo_is_dir,
+                    pending_wake.undo_was_create);
+                wake_meta_clear();
             } else {
-                ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
+                wake_record(&K.wake, line ? line : argv[0], argv[0], pargs, K.user,
                     K.monads.tick_count, result, "Executed", 0, NULL, NULL, 0, 0);
             }
             return result;
@@ -4061,13 +4061,13 @@ static int dispatch_argv(const char *line, int argc, char **argv, char *output, 
     int idx = path_lookup_executable(argv[0], resolved);
     if (idx >= 0 && is_script_node(idx)) {
         int result = run_script_node(idx, argc, argv, output, outsize);
-        ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
+        wake_record(&K.wake, line ? line : argv[0], argv[0], pargs, K.user,
             K.monads.tick_count, result, "script exec", 0, NULL, NULL, 0, 0);
         return result;
     }
 
     snprintf(output, outsize, "amosoz: command not found: %s", argv[0]);
-    ledger_record_ex(&K.ledger, line ? line : argv[0], argv[0], pargs, K.user,
+    wake_record(&K.wake, line ? line : argv[0], argv[0], pargs, K.user,
         K.monads.tick_count, ERR_NOT_FOUND, "not found", 0, NULL, NULL, 0, 0);
     return ERR_NOT_FOUND;
 }
@@ -4264,8 +4264,8 @@ static const CmdEntry CMD_TABLE[] = {
     {"stat", cmd_stat}, {"tree", cmd_tree}, {"echo", cmd_echo},
     {"env", cmd_env}, {"set", cmd_set}, {"unset", cmd_unset},
     {"date", cmd_date}, {"history", cmd_history}, {"selftest", cmd_selftest},
-    {"oz", cmd_oz}, {"slots", cmd_slots}, {"modules", cmd_modules},
-    {"overhead", cmd_overhead}, {"hooks", cmd_hooks}, {"contracts", cmd_contracts},
+    {"oz", cmd_oz}, {"slots", cmd_slots}, {"organs", cmd_modules},
+    {"overhead", cmd_overhead}, {"pulses", cmd_hooks}, {"contracts", cmd_contracts},
     {"loadmod", cmd_loadmod}, {"unloadmod", cmd_unloadmod}, {"call", cmd_call},
     {"trace", cmd_trace}, {"replay", cmd_replay}, {"undo", cmd_undo},
     {"whoami", cmd_whoami}, {"motd", cmd_motd}, {"syscall", cmd_syscall},

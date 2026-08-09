@@ -9,9 +9,53 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
   canon's `am_program_step` can yield. A `while` still runs all of its iterations inside one
   step, because the block state lives on the C stack. Lifting it into the program handle is
   upstream work on `ariannamethod.ai` — worth doing when a real monad hits the wall, not before.
-- **Resonant renaming, pass 2.** Pass 1 took the monad concept (2026-08-02). The ledger, slots,
-  hooks and contracts still carry neutral names; they are the OZ layer and can take the resonant
-  register when that layer next grows. The Unix-treaty userland stays as it is, permanently.
+- **Resonant renaming, pass 3 (open).** `loadmod` / `unloadmod` still carry the old noun;
+  `graft` / `shed` would fit the organ register. Not done — it was outside the three agreed,
+  and scope expansion is a fork to agree, not to take.
+
+---
+
+## 2026-08-10 — Resonant renaming, pass 2: the OZ layer takes the Method's own words
+
+Pass 1 gave the citizens their name (monads). The extension layer around them still spoke in
+neutral engineering nouns. Three concepts move; two deliberately do not.
+
+- **`Module` → `Organ`.** The word the Method actually uses everywhere else — an organ is
+  measured, grafted, rejected. `organ_register`, `organ_unload`, `organ_validate_contracts`,
+  `MAX_ORGANS`, command `organs`.
+- **`Hook` → `Pulse`**, and **`fire_hook` → `galvanize`** (Oleg's pick, out of the TRIPD
+  archive's vocabulary). A hook is "called"; a pulse travels and things answer it.
+  `pulse_find`, `pulse_init`, `MAX_PULSE_LISTENERS`, `listeners` instead of `subscribers`,
+  command `pulses`.
+- **`OZLedger` → `Wake`.** The trace a passage leaves behind. The project's own motto — *every
+  command leaves a trace* — stops being a metaphor. `wake_record`, `WakeEntry`, `MAX_WAKE`;
+  `trace` stays as the verb that reads it.
+- **`Slot` stays**, because it is already the canon's word (`AM_SpawnSlot`, `AM_ChannelSlot` in
+  AML, slots in SARTRE) and the code's own line says what it means: *a slot is a promise with a
+  boundary*. **`contracts` stays** — "OZ begins where extension becomes accountable" already
+  names it correctly. Renaming those would be drifting from the canon for the sake of prettiness.
+- Also renamed where the concepts live in **data**, not only in identifiers: the slot names
+  `ai.hooks` → `ai.pulses`, the built-in organ `oz_ledger` → `oz_wake` and the commands it
+  provides (`ledger_size` → `wake_size`), the contract `oz.ledger` → `oz.wake`. Leaving those
+  stale is exactly the half-rename that `sigmask` taught us to avoid.
+- **Not renamed, and flagged rather than slipped in:** `loadmod` / `unloadmod` still carry the
+  old noun. `graft` / `shed` would fit the organ register, but that was not in the three agreed
+  and scope expansion is a fork to be agreed, not taken.
+
+### Verification
+- **Pass 1 (internals only) is byte-identical.** A 45-command scenario was frozen first —
+  244 lines, md5 `6d7c948458adb1e1abc340a43b26e9b4`, reproducible across three cold runs — and
+  the ledger→wake and module→organ passes reproduce it exactly. Two visible strings my first
+  substitution touched by accident were reverted to keep the proof clean, then changed
+  deliberately in pass 2. One declared exception: the selftest label `hook_boot_fired` →
+  `pulse_boot_fired`, which is the check naming the renamed field.
+- **Pass 2's diff is the rename and nothing else.** Every differing line against the frozen
+  baseline contains one of the six words; filtering those out leaves **0 lines**. Re-frozen at
+  md5 `a77ed43a40459b58251dac115e55c042`, reproducible across three cold runs.
+- No stale word survives: `grep -c` for `module|Module|hook|Hook|ledger|Ledger` over `amosoz.c`
+  returns **0**, and over `README.md` **0**.
+- `make` 0 errors; selftest **60/60**, 0 FAIL; shell treaty **ALL PASSED**; `html_selftest`
+  **43/43**; ASan **0** on the scenario.
 
 ---
 
