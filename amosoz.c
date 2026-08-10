@@ -1910,10 +1910,10 @@ static int cmd_help(char *out, int sz, int argc, char **argv) {
         "amosOZ commands:\n"
         "  alloc append boot call cat cd chmod clear contracts cp date\n"
         "  devices echo env exit fortune free help history pulses hw\n"
-        "  exec fortune free help history pulses hw kill load loadmod ls mem\n"
+        "  exec fortune free help graft history pulses hw kill load ls mem\n"
         "  mkdir mmap organs motd mv overhead oz ps pwd replay rm rmdir\n"
         "  run save selftest set slots syscall stat status tick touch trace\n"
-        "  tree undo uname unloadmod unset version which whoami write\n"
+        "  shed tree undo uname unset version which whoami write\n"
         "  Shell: > >> |  Scripts: #!/amossh .amos  PATH:/bin");
     return ERR_OK;
 }
@@ -2974,20 +2974,20 @@ static int cmd_contracts(char *out, int sz, int argc, char **argv) {
     return ERR_OK;
 }
 
-static int cmd_loadmod(char *out, int sz, int argc, char **argv) {
+static int cmd_graft(char *out, int sz, int argc, char **argv) {
     if (organ_validate_contracts() != ERR_OK) {
-        snprintf(out, sz, "loadmod: contract validation failed (missing required slots)");
+        snprintf(out, sz, "graft: contract validation failed (missing required slots)");
         return ERR_MODULE;
     }
-    snprintf(out, sz, "loadmod: dynamic loading not supported in v%s (organs compiled-in; contracts OK)",
+    snprintf(out, sz, "graft: dynamic loading not supported in v%s (organs compiled-in; contracts OK)",
         VERSION);
     return ERR_OK;
 }
 
-static int cmd_unloadmod(char *out, int sz, int argc, char **argv) {
-    if (argc < 2) { snprintf(out, sz, "Usage: unloadmod <organ_name>"); return ERR_INVALID; }
+static int cmd_shed(char *out, int sz, int argc, char **argv) {
+    if (argc < 2) { snprintf(out, sz, "Usage: shed <organ_name>"); return ERR_INVALID; }
     int err = organ_unload(argv[1]);
-    if (err != ERR_OK) { snprintf(out, sz, "unloadmod: organ '%s' not found", argv[1]); return err; }
+    if (err != ERR_OK) { snprintf(out, sz, "shed: organ '%s' not found", argv[1]); return err; }
     snprintf(out, sz, "Unloaded organ '%s'", argv[1]);
     return ERR_OK;
 }
@@ -4266,7 +4266,7 @@ static const CmdEntry CMD_TABLE[] = {
     {"date", cmd_date}, {"history", cmd_history}, {"selftest", cmd_selftest},
     {"oz", cmd_oz}, {"slots", cmd_slots}, {"organs", cmd_modules},
     {"overhead", cmd_overhead}, {"pulses", cmd_hooks}, {"contracts", cmd_contracts},
-    {"loadmod", cmd_loadmod}, {"unloadmod", cmd_unloadmod}, {"call", cmd_call},
+    {"graft", cmd_graft}, {"shed", cmd_shed}, {"call", cmd_call},
     {"trace", cmd_trace}, {"replay", cmd_replay}, {"undo", cmd_undo},
     {"whoami", cmd_whoami}, {"motd", cmd_motd}, {"syscall", cmd_syscall},
     {"which", cmd_which}, {"exec", cmd_exec},

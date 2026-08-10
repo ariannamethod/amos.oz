@@ -9,9 +9,23 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
   canon's `am_program_step` can yield. A `while` still runs all of its iterations inside one
   step, because the block state lives on the C stack. Lifting it into the program handle is
   upstream work on `ariannamethod.ai` — worth doing when a real monad hits the wall, not before.
-- **Resonant renaming, pass 3 (open).** `loadmod` / `unloadmod` still carry the old noun;
-  `graft` / `shed` would fit the organ register. Not done — it was outside the three agreed,
-  and scope expansion is a fork to agree, not to take.
+
+---
+
+## 2026-08-10 — Resonant renaming, pass 3: an organ is grafted and shed
+
+The last two neutral nouns in the command surface. `loadmod` / `unloadmod` were the verbs of a
+module system; the layer holds organs now, and an organ is **grafted** and **shed**. Internals
+follow (`cmd_graft`, `cmd_shed`), as do the usage strings and the `help` listing.
+
+### Verification
+- Baseline re-frozen first, this time with the scenario actually calling both commands —
+  including a failing `shed nosuchorgan`, so the error path is covered: md5
+  `c9b718a6279aac55260c5d80e538e814`, three cold runs identical.
+- The diff against it is the rename and nothing else: filtering lines that mention
+  `loadmod|unloadmod|graft|shed` leaves **0**.
+- `grep -c` for the old nouns over `amosoz.c` returns **0**. `make` 0 errors; selftest
+  **60/60**, 0 FAIL; shell treaty **ALL PASSED**; `html_selftest` **43/43**; ASan **0**.
 
 ---
 
