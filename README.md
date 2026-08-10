@@ -55,7 +55,7 @@ Core OS primitives (AMOS body):
 | Scheduler / Resources | `nice`, `slice`, `limit`, `climit` (cpu + mem hard limits + violations) |
 | Shell / IPC | `echo`, `env`, `set`, `unset`, `export`, `source`, `history`, `which`, `exec`, `test`, `send` (mailbox IPC) |
 | Logic / Syscall | `true`, `false`, `syscall` |
-| OZ / Meta | `oz`, `slots`, `organs`, `overhead`, `pulses`, `contracts`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
+| OZ / Meta | `oz`, `slots`, `organs`, `overhead`, `pulses`, `contracts`, `graft`, `shed`, `trace`, `replay`, `undo`, `spec`, `doctor`, `selftest`, `reset`, `fortune` |
 | Field / AML | `field` (read the resonance field), `resonate <AML directive>` (a command IS a perturbation), `run <x.aml>` (an AML program becomes a monad, sliced `max_slice` statements per quantum — `slice <pid> N` tunes it), `mood <pid> [dim value]` (the monad's own weather — pain/tension/flow/warmth — weighed by the shared emergence) |
 | Persist | `save`, `load` |
 
