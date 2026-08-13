@@ -43,6 +43,16 @@ echo "$out" | grep -q 'for pid 2' || { echo "FAIL: memory charged to the schedul
 out=$(run 'run drifter' 'tick' 'fork')
 echo "$out" | grep -q 'from 2' || { echo "FAIL: fork cloned the scheduler's pick, not the shell"; exit 1; }
 
+# sleep belongs to whoever asked for it. It used to read argv[0] — the command name — so it
+# slept 0 ticks, and it blocked the first *running* row, i.e. the scheduler's pick.
+out=$(run 'run drifter' 'tick' 'sleep 5' 'ps')
+echo "$out" | grep -q 'PID 2 blocked for 5 ticks' || { echo "FAIL: sleep did not block the actor for the asked count"; exit 1; }
+echo "$out" | grep -qE '^2[[:space:]]+amossh[[:space:]]+blocked' || { echo "FAIL: the actor is not blocked after sleep"; exit 1; }
+
+out=$(run 'sleep' 'sleep abc')
+echo "$out" | grep -q 'Usage: sleep' || { echo "FAIL: sleep without an argument is not refused"; exit 1; }
+echo "$out" | grep -q 'must be a positive number' || { echo "FAIL: sleep with a non-number is not refused"; exit 1; }
+
 out=$(run 'which echo')
 echo "$out" | grep -q '/bin/echo' || { echo "FAIL: which"; exit 1; }
 

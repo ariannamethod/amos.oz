@@ -12,6 +12,40 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-13 — `sleep` read the command's own name, and put a stranger to bed
+
+The tail of wave 1. Two defects in four lines, both visible in one probe:
+
+```
+sleep 5                      →  "no running process to sleep"
+run drifter; tick; sleep 5   →  "PID 3 blocked for 0 ticks"
+```
+
+`atoi(argv[0])` read the **command name** — `atoi("sleep")` is 0 — so the user's argument was
+never looked at, and the count was always zero. And it blocked the first row in state `running`,
+which is the scheduler's pick: `sleep` at the prompt put **someone else** to sleep, or refused
+outright when the shell was not the one selected.
+
+Now it blocks `actor_pid` and reads `argv[1]`; a missing or non-positive count is refused
+instead of silently sleeping zero.
+
+### Verification
+- `sleep 5` → `PID 2 blocked for 5 ticks`, and `ps` shows the shell `blocked`. With a live
+  neighbour it still takes the shell, not `drifter`. `sleep` and `sleep abc` are both refused.
+- Four treaty cases; the same suite against a build of `12cd4ea` fails with
+  `sleep did not block the actor for the asked count`.
+- Selftest **60/60**, 0 FAIL; `html_selftest` **43/43**; ASan **0** on the sleep path.
+
+**What the probe found that is not mine, measured rather than argued.** The actor does *not*
+sleep for the count it asked: `sleep 5` wakes it after **2** ticks. The cause is the never-none
+rescue at `amosoz.c:1394` — its last cascade level grabs any monad that is neither zombie nor
+stopped and forces it to `ready`, and a *blocked* monad qualifies. The occupancy guarantee wakes
+the sleeper. So no duration case was written: it would have asserted a lie. This is Sol's
+blocker #3 with a number attached, and it is the next wave — an explicit IDLE/silence locus
+rather than a fallback that resurrects hard state.
+
+---
+
 ## 2026-08-13 — Sol's audit, wave 1: the actor is not the scheduler's pick
 
 An independent read-only audit of `main@030eba3` by Sol (GPT-5.6) landed. Its central verdict is

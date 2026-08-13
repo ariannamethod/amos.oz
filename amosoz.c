@@ -2173,19 +2173,23 @@ static int cmd_kill(char *out, int sz, int argc, char **argv) {
 }
 
 static int cmd_sleep(char *out, int sz, int argc, char **argv) {
-    if (argc < 1) { snprintf(out, sz, "Usage: sleep <ticks>"); return ERR_INVALID; }
-    int ticks = atoi(argv[0]);
-    /* block one running process */
+    /* argv[0] is the command name, so `atoi(argv[0])` read "sleep" and slept for 0 ticks —
+     * the user's argument was never looked at. And it blocked the first *running* row, which
+     * is the scheduler's pick: `sleep` at the prompt put a stranger to sleep. It is the actor
+     * who asked to wait, so it is the actor who waits. */
+    if (argc < 2) { snprintf(out, sz, "Usage: sleep <ticks>"); return ERR_INVALID; }
+    int ticks = atoi(argv[1]);
+    if (ticks <= 0) { snprintf(out, sz, "sleep: <ticks> must be a positive number"); return ERR_INVALID; }
     for (int i = 0; i < MAX_MONADS; i++) {
-        if (K.monads.monads[i].used && strcmp(K.monads.monads[i].state, "running") == 0) {
+        if (K.monads.monads[i].used && K.monads.monads[i].pid == K.actor_pid) {
             strcpy(K.monads.monads[i].state, "blocked");
             K.monads.monads[i].sleep_ticks = ticks;
             snprintf(out, sz, "PID %d blocked for %d ticks", K.monads.monads[i].pid, ticks);
             return ERR_OK;
         }
     }
-    snprintf(out, sz, "no running process to sleep");
-    return ERR_OK;
+    snprintf(out, sz, "sleep: no actor to block");
+    return ERR_NO_PROCESS;
 }
 
 /* Reap a zombie child of either the current proc or the shell. selected_pid drifts as
