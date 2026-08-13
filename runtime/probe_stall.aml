@@ -1,0 +1,6 @@
+CHANNEL CREATE stallbus 8
+n = 0
+while n < 3:
+    CHANNEL READ stallbus v
+    n = n + 1
+TENSION 0.3

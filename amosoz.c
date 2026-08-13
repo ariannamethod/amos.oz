@@ -62,6 +62,7 @@ static inline int safe_append(char *buf, int offset, int bufsz, const char *fmt,
 #define MAX_PULSE_LISTENERS 8
 #define MAX_CMD_LEN 1024
 #define MAX_PIPE_PARTS 8
+#define MAX_SLICE_STALL_MS 250   /* a slice that holds the kernel longer than this is a stall */
 #define MEM_TOTAL_KB 65536
 
 /* ─── Error Codes ─────────────────────────────────────────────────────────── */
@@ -150,6 +151,8 @@ typedef struct {
     int cpu_time; /* cpu time consumed while running (foundation accounting) */
     int cpu_limit; /* hard cpu time limit (ticks) - enforce in scheduler */
     int cpu_violations; /* count of times limit was hit */
+    int stall_ms;       /* wall duration of this monad's last slice */
+    int stall_count;    /* slices that held the kernel past MAX_SLICE_STALL_MS */
     int numbness; /* signals this monad cannot feel; KILL and STOP pierce it */
     char mailbox[256]; /* simple IPC mailbox for send/recv */
     /* the monad's own weather. The shared field is the system's; this is what THIS monad
@@ -669,7 +672,7 @@ static void proc_refresh_all(void) {
             snprintf(buf, sizeof(buf),
                 "Name:\t%s\nPid:\t%d\nPPid:\t%d\nState:\t%s\n"
                 "Ticks:\t%d\nCpuTime:\t%d\nCpuLimit:\t%d\nCpuViolations:\t%d\nPrio:\t%d\nSlice:\t%d/%d\n"
-                "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\n"
+                "Mem:\t%d/%d kB\nSignals:\t%d\nNumbness:\t%d\nFds:\t%d\nStall:\t%d ms (%d over %d ms)\n"
                 "Mood:\tpain %.3f tension %.3f flow %.3f warmth %.3f\n",
                 K.monads.monads[i].name, pid, K.monads.monads[i].ppid,
                 K.monads.monads[i].state,
@@ -677,6 +680,7 @@ static void proc_refresh_all(void) {
                 K.monads.monads[i].priority, K.monads.monads[i].slice_used, K.monads.monads[i].max_slice,
                 K.monads.monads[i].mem_used_kb, K.monads.monads[i].mem_limit_kb,
                 K.monads.monads[i].signals, K.monads.monads[i].numbness, fcount,
+                K.monads.monads[i].stall_ms, K.monads.monads[i].stall_count, MAX_SLICE_STALL_MS,
                 K.monads.monads[i].mood_pain, K.monads.monads[i].mood_tension,
                 K.monads.monads[i].mood_flow, K.monads.monads[i].mood_warmth);
             proc_write_file(ppath, buf);
@@ -866,6 +870,8 @@ static int monad_spawn(MonadTable *pt, const char *name, int parent_pid) {
             pt->monads[i].cpu_time = 0;
             pt->monads[i].cpu_limit = 100000; /* default high cpu limit */
             pt->monads[i].cpu_violations = 0;
+            pt->monads[i].stall_ms = 0;
+            pt->monads[i].stall_count = 0;
             pt->monads[i].numbness = 0;
             pt->monads[i].mailbox[0] = '\0';
             pt->monads[i].mood_pain = pt->monads[i].mood_tension = 0.0f;
@@ -969,9 +975,21 @@ static void monad_run_slice(Monad *p) {
     AM_State *fs = am_get_state();
     float b_pain = fs->pain, b_tension = fs->tension, b_flow = fs->flow, b_warmth = fs->warmth;
 
+    /* The kernel cannot preempt a slice: control is inside the AML interpreter until the
+     * statement returns, and a blocking directive there (an empty CHANNEL READ sleeps ~1.3 s)
+     * holds the whole system. Measured: three such reads in a loop = 3.90 s, the same loop on
+     * CHANNEL TRY = 0.02 s. So the quantum is timed after the fact and a monad that held the
+     * kernel too long is stopped — the harm already happened; letting it run again repeats it.
+     * Wall time, not clock(): a sleeping thread burns no CPU and clock() cannot see the stall. */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
     int before = am_program_remaining(p->aml_prog);
     int done = am_program_step(p->aml_prog, p->max_slice > 0 ? p->max_slice : 1);
     int consumed = before - am_program_remaining(p->aml_prog);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    p->stall_ms = (int)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
 
     p->cpu_time += consumed;
     p->mood_pain    += fs->pain    - b_pain;
@@ -983,6 +1001,9 @@ static void monad_run_slice(Monad *p) {
         p->exit_code = am_program_close(p->aml_prog);
         p->aml_prog = NULL;
         strcpy(p->state, "zombie");
+    } else if (p->stall_ms > MAX_SLICE_STALL_MS) {
+        p->stall_count++;
+        strcpy(p->state, "stopped");   /* it held the kernel; it does not get the next turn */
     }
 }
 

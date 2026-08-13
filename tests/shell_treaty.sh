@@ -103,6 +103,17 @@ for _ in 1 2 3; do run "run $ROOT/runtime/probe_empty.aml" "tick" "tick" >/dev/n
 t1=$(date +%s)
 [ $((t1 - t0)) -lt 2 ] || { echo "FAIL: reading an empty bus stalls the kernel ($((t1-t0))s for 3 runs)"; exit 1; }
 
+# The kernel cannot preempt a slice — control is inside the AML interpreter until the statement
+# returns, and a blocking directive there holds the whole system. The quantum is therefore timed
+# after the fact: a monad that held it past MAX_SLICE_STALL_MS is counted and stopped.
+out=$(run "run $ROOT/runtime/probe_stall.aml" 'slice 3 1' 'tick' 'tick' 'tick' 'tick' 'tick' 'cat /proc/3/status')
+echo "$out" | grep -qE 'Stall:[[:space:]]+[0-9]+ ms \(1 over' || { echo "FAIL: a stalling slice was not counted"; exit 1; }
+echo "$out" | grep -qE 'State:[[:space:]]+stopped' || { echo "FAIL: a stalling monad kept its turn"; exit 1; }
+
+# and a monad that does not block is untouched by the watchdog
+out=$(run "run $ROOT/runtime/probe_empty.aml" 'slice 3 1' 'tick' 'tick' 'tick' 'cat /proc/3/status')
+echo "$out" | grep -qE 'Stall:[[:space:]]+[0-9]+ ms \(0 over' || { echo "FAIL: the watchdog flagged a monad that never stalled"; exit 1; }
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 
