@@ -5,10 +5,46 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ## Roadmap (open — not yet done)
 
-- **Suspending inside a loop.** D3 slices a monad at top-level statements, which is where the
-  canon's `am_program_step` can yield. A `while` still runs all of its iterations inside one
-  step, because the block state lives on the C stack. Lifting it into the program handle is
-  upstream work on `ariannamethod.ai` — worth doing when a real monad hits the wall, not before.
+- **Bound the quantum, not the loop (partly done 08-13).** A slice is timed after the fact and a
+  stalling monad is stopped. Still open: the only real source of a stall is a blocking directive
+  inside a slice, and the watchdog reacts rather than prevents. Preventing it means the language
+  offering a non-blocking form of every directive that can wait — `CHANNEL TRY` is the first.
+
+---
+
+## 2026-08-13 — The roadmap item was wrong; the quantum gets a watchdog instead
+
+The open item said a long `while` inside a monad freezes the system, so the canon should make
+loops suspendable. **Measured, that is false.** AML caps a loop at 10000 iterations
+(`core/ariannamethod.c:6079`) and the interpreter is fast: 100, 2000 and 9000 iterations all
+come in at **0.01 s**. Arithmetic cannot stretch a quantum. I had called that gate live twice —
+first framed as tick starvation, then as wall time — and it was neither.
+
+**The reachable hazard is a blocking directive inside the body, not the loop itself.** Three
+empty `CHANNEL READ`s in a loop: **3.90 s**. The same loop on `CHANNEL TRY`: **0.02 s**. And
+suspendable loops would not fix it — yielding happens *between* iterations, while the freeze sits
+*inside* one, asleep in `nanosleep`. There is nothing to yield.
+
+So the roadmap item is dropped and replaced by what the measurement actually asks for. The kernel
+cannot preempt a slice — control is inside the interpreter until the statement returns — so the
+quantum is timed **after the fact**:
+
+- `monad_run_slice` measures its own wall duration (`CLOCK_MONOTONIC`; `clock()` would see
+  nothing, since a sleeping thread burns no CPU — a lesson already paid for in the canon).
+- A slice past `MAX_SLICE_STALL_MS` (250) increments `stall_count` and the monad is **stopped**.
+  The harm already happened; letting it take the next turn repeats it.
+- `/proc/<pid>/status` reports `Stall: <ms> (<count> over <threshold> ms)`.
+
+### Verification
+- Blocking read in a loop → `State: stopped`, `Stall: 3781 ms (1 over 250 ms)`. The same program
+  on `CHANNEL TRY` → `State: zombie`, `Stall: 0 ms (0 over 250 ms)`: the watchdog catches a stall,
+  not merely any monad.
+- **Falsified two ways.** A scratch build with the threshold raised to 99000 ms lets the same
+  input run to completion (`zombie`, `0 over 99000 ms`), and the same treaty suite run against
+  that build fails with `a stalling slice was not counted`.
+- Both cases are in the shell treaty (`runtime/probe_stall.aml`), the clean one reusing
+  `probe_empty.aml`. Selftest **60/60**, 0 FAIL — the 4-second probe deliberately lives in the
+  treaty, not in `make test`. `html_selftest` **43/43**; ASan **0** on the watchdog path.
 
 ---
 
