@@ -31,6 +31,18 @@ echo "$out" | grep -q 'too many pipeline stages' || { echo "FAIL: pipeline overf
 out=$(run 'cat < /etc/hostname')
 echo "$out" | grep -q amosoz || { echo "FAIL: stdin redirect"; exit 1; }
 
+# A shell command belongs to the shell, not to whoever the scheduler picked last tick. Before
+# the actor/selected split this printed `/`: cd wrote into the selected monad, the auto-tick
+# moved the selection, and pwd read someone else's cwd.
+out=$(run 'cd /tmp' 'pwd')
+echo "$out" | grep -qE '\$ /tmp$' || { echo "FAIL: cd does not survive to the next command"; exit 1; }
+
+out=$(run 'run drifter' 'tick' 'alloc 64' 'cat /proc/2/status')
+echo "$out" | grep -q 'for pid 2' || { echo "FAIL: memory charged to the scheduler's pick, not the shell"; exit 1; }
+
+out=$(run 'run drifter' 'tick' 'fork')
+echo "$out" | grep -q 'from 2' || { echo "FAIL: fork cloned the scheduler's pick, not the shell"; exit 1; }
+
 out=$(run 'which echo')
 echo "$out" | grep -q '/bin/echo' || { echo "FAIL: which"; exit 1; }
 

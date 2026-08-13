@@ -12,6 +12,53 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
 
 ---
 
+## 2026-08-13 — Sol's audit, wave 1: the actor is not the scheduler's pick
+
+An independent read-only audit of `main@030eba3` by Sol (GPT-5.6) landed. Its central verdict is
+not a bug list: `Monad` / `current_pid` conflated four different things — whom the scheduler
+chose, who authored a shell command, who owns resources, and what backend a monad actually has.
+This wave closes the first of them, in the order the handoff asked for.
+
+**The defect in one line, and it is user-visible:** `cd /tmp` was invisible to the very next
+command. Measured, three cold runs: `cd /tmp ; pwd` → `/`, while `cd /tmp ; true ; pwd` → `/tmp`.
+No second monad needed. Both `chdir` and `cmd_pwd` addressed the monad at `current_pid`; between
+two commands the main loop ticks, the scheduler picks someone else, so the shell wrote its cwd
+into one monad and read it back from another. The interactive user's working directory belonged
+to whoever the scheduler happened to select.
+
+- `current_pid` → **`selected_pid`** (whom the scheduler chose) and a new **`actor_pid`** (on
+  whose behalf a command runs; the shell by default, changed by `fg`).
+- 28 sites moved to the actor: every `kernel_syscall` path, `fs_resolve`, cwd, fds, memory
+  ownership, `fork` / `run` / `exec` parenthood, `wait`. The scheduler keeps its own field in
+  `monad_tick`, `monad_choose`, `cmd_tick`, `cmd_current`.
+
+### Verification
+- The two halves are proven separately. The **rename** is byte-identical: a 47-command scenario
+  frozen first at md5 `c035ef4ab2c384e00242f04eb9b7e9e7` reproduces exactly after
+  `current_pid` → `selected_pid`. Behaviour moves only in the second half, when the actor exists.
+- Every one of the 18 differing lines after the split is the identity fix, each in the right
+  direction: `pwd` after `cd` is `/tmp`; `forked pid 5 from 3` becomes `from 2`; `alloc` charges
+  the shell instead of the scheduler's pick. **`fork` at the prompt used to clone a stranger** —
+  whichever monad the scheduler had selected — which is not cosmetic.
+- Three cases added to the shell treaty (cd survives, memory charged to the shell, fork clones
+  the shell). The same suite run against a build of the pre-fix `amosoz.c` fails with
+  `cd does not survive to the next command`.
+- **Two selftests Sol found were literal `CHECK(..., 1)`** — `process_kill` and `ps_has_mem`,
+  both marked "simplified for now". My `60/60` has been carrying two no-ops all along. They are
+  now real (`monad_kill_zombies`, `ps_reports_memory`) and both fail on a build where the thing
+  they name is broken.
+- Her measurement corrections, re-checked here: the command table holds **105 names / 104
+  handlers**, not the 127 I had claimed from a sloppy `grep`. Coverage: shell treaty exercises
+  **20/104** handlers, with the selftest **28/104**. The frozen-baseline method is a lock on a
+  known path, not broad evidence.
+- `make` 0 errors; selftest **60/60**, 0 FAIL; shell treaty **ALL PASSED**; `html_selftest`
+  **43/43**; ASan **0** on the scenario.
+
+**Still open from wave 1, named rather than quietly skipped:** `cmd_sleep` parses `argv[0]` and
+blocks an arbitrary running row for zero ticks. Same blocker, separate probe.
+
+---
+
 ## 2026-08-13 — The roadmap item was wrong; the quantum gets a watchdog instead
 
 The open item said a long `while` inside a monad freezes the system, so the canon should make
