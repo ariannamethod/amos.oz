@@ -10,6 +10,78 @@ and **how it was verified** — decisions and evidence, not process. Newest firs
   inside a slice, and the watchdog reacts rather than prevents. Preventing it means the language
   offering a non-blocking form of every directive that can wait — `CHANNEL TRY` is the first.
 
+- **The reference implementations do not model the scheduler floor.** `reffs/amosoz.py` and
+  `reffs/amosoz.html` never carried the never-none cascade (`grep` for either guarantee: 0 hits),
+  and they have no IDLE either. `parity_runner` compares "did each selftest pass", not behaviour,
+  so the triple parity is green while the three implementations disagree about what happens when
+  nobody is eligible. Either the references grow a floor or the parity claim narrows to what it
+  actually checks.
+
+---
+
+## 2026-08-15 — Sol's audit, wave 2: an empty run queue is a state, not an emergency
+
+Blocker #3. The kernel guaranteed that somebody is always running, and paid for it by rewriting
+hard state: a three-level cascade plus an "ultimate force" that promoted whoever was left. Three
+probes, all red on `83507fa`, each a different way for the guarantee to lie:
+
+```
+signal 1 19 ; signal 2 19 ; tick   →  both stopped, none running,
+                                      yet `current pid: 2 (amossh) state=stopped`
+signal 1 19 ; sleep 5 ; ps         →  the sleeper is running on the next tick
+climit 1 2 ; climit 2 2 ; tick ×3  →  amossh running with CpuTime 3 at CpuLim 2
+```
+
+The third is the sharpest: the kernel broke a limit it declares itself, so that someone would
+count as executing. Occupancy was placed above every other guarantee.
+
+**A correction to my own wave-1 entry, since it is on the same subject.** That entry reported
+`sleep 5` waking after 2 ticks. It was a misread: the `2` was the `Ticks` column — how many times
+that monad had held the CPU — not the sleep's duration. Measured properly now, one `ps` per tick,
+`83507fa` holds the sleeper blocked for exactly 5 ticks whenever init is eligible. The real defect
+is narrower and worse: the sleep is only stolen when nobody *else* can run, which is precisely
+when the cascade fires. The duration case that was skipped as "it would assert a lie" can be
+written after all — it is in the treaty now.
+
+**The fix is a locus, not a guard.** A reserved monad `idle`, pid 0, in the last slot. It is a
+citizen: `ps` lists it, `current` names it, and when it holds the CPU the system is honestly doing
+nothing. `monad_choose` skips it, so it never competes; nothing else about the calm path moves.
+The whole cascade and the ultimate force are gone, replaced by `if (best_idx < 0) best_idx = IDLE`.
+The cpu limit moved out of the selection path into its own pass over the table, so it applies to
+every monad standing at its limit rather than only to the one the scheduler happened to pick —
+that branch was only ever reachable because a fallback level chose monads that were already over.
+
+The invariant, in one line: **the kernel either selects a monad it is allowed to run, or it runs
+IDLE — never a stopped, blocked, zombie or over-limit row.**
+
+### Verification
+
+- The three probes, re-run on the new build: IDLE takes the seat with both citizens stopped and
+  `current pid: 0 (idle)`; the sleeper stays `blocked` for all 4 observed ticks with init stopped;
+  with both limits spent, `CpuTime` stops at `CpuLim` for both and the system idles.
+- **Falsified in two shapes, because one shape passes on the broken build.** The selftest case
+  runs twice: everyone stopped, then everyone stopped with one sleeper. Compiled into a working
+  copy of `83507fa` unchanged in meaning, mode 0 fails `selection_sound_empty_queue` (the seat was
+  left on a dead row) and mode 1 fails `idle_when_only_sleepers_left` (the sleeper was woken).
+  Each mode alone passes there — only the pair separates the two defects.
+- `CHECK("current_pid_set", K.selected_pid > 0)` was a proxy, and pid 0 is now a legal answer. It
+  is replaced by `kernel_selection_is_sound()`, which asks what the selection claims: a live monad
+  in `running`/`ready`, IDLE or within its cpu limit.
+- **Calm regression, byte-level:** a 26-command scenario frozen on `83507fa` at md5
+  `84b8b55104593a112223aa33cfb94011` reproduces with exactly four added lines, all of them
+  `0 idle ready` in the four `ps` outputs. Every `Tick: N running=…` line is unchanged: while
+  anybody is eligible, the scheduler picks exactly whom it picked before.
+- **A hole this change opened, found by probing rather than by reading:** `fg 0` made IDLE the
+  actor, and `fork` then cloned it — a second monad named `idle` that my own limit pass stopped
+  immediately (`cpu_limit` 0). IDLE now refuses `fg`, signals, `kill`, and every scheduling knob
+  (`nice`/`slice`/`climit`/`limit`/`mood`/`numb`/`feel`); a knob it does not obey would only make
+  `ps` lie about it. All of it is in the treaty.
+- Selftest **64/64**, 0 FAIL (was 60/60 — four new cases); shell treaty **ALL PASSED** with four
+  new cases; `html_selftest` **43/43**; `parity_runner` C/Python/HTML all OK; `make` 0 errors,
+  and the warning count is unchanged at 91 — same flags, same include path, both revisions.
+- ASan **0** on the scheduler paths: the stopped-pair probe, the exhausted-limit probe, the IDLE
+  guard probe and the selftest.
+
 ---
 
 ## 2026-08-13 — `sleep` read the command's own name, and put a stranger to bed

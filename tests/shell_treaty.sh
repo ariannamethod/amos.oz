@@ -136,6 +136,36 @@ echo "$out" | grep -qE 'State:[[:space:]]+stopped' || { echo "FAIL: a stalling m
 out=$(run "run $ROOT/runtime/probe_empty.aml" 'slice 3 1' 'tick' 'tick' 'tick' 'cat /proc/3/status')
 echo "$out" | grep -qE 'Stall:[[:space:]]+[0-9]+ ms \(0 over' || { echo "FAIL: the watchdog flagged a monad that never stalled"; exit 1; }
 
+# An empty run queue is a state, not an emergency. With init and the shell stopped the kernel
+# runs IDLE and says so; before the silence locus it named a stopped monad as the current one.
+out=$(run 'signal 1 19' 'signal 2 19' 'tick' 'ps' 'current')
+echo "$out" | grep -qE '^0 +idle +running' || { echo "FAIL: nobody eligible and IDLE did not take the seat"; exit 1; }
+echo "$out" | grep -q 'current pid: 0 (idle)' || { echo "FAIL: the kernel named someone else while idle"; exit 1; }
+echo "$out" | grep -qE '^2 +amossh +stopped' || { echo "FAIL: a stopped monad was resurrected to fill the seat"; exit 1; }
+
+# A sleeper is hard state too: the old occupancy guarantee woke it to have someone running,
+# which made every sleep shorter than it asked for whenever nobody else was eligible.
+out=$(run 'signal 1 19' 'sleep 5' 'ps' 'ps' 'ps')
+echo "$out" | grep -qE '^2 +amossh +running' && { echo "FAIL: a sleeping actor was woken to fill the seat"; exit 1; }
+echo "$out" | grep -qE '^2 +amossh +blocked' || { echo "FAIL: sleep did not hold the actor blocked"; exit 1; }
+
+# The cpu limit is the kernel's own promise: with every limit spent the system idles rather
+# than running someone past it.
+out=$(run 'climit 1 2' 'climit 2 2' 'tick' 'tick' 'tick' 'ps')
+echo "$out" | grep -qE '^[12] +(init|amossh) +[a-z]+ +[0-9]+ +[3-9]' && { echo "FAIL: a monad ran past its cpu limit"; exit 1; }
+echo "$out" | grep -qE '^0 +idle +running' || { echo "FAIL: limits exhausted and the kernel did not idle"; exit 1; }
+
+# IDLE is not a citizen anyone may end, tune or speak for: without it an empty queue has no
+# legal answer, and as an actor it would own a cwd, fds and children (`fork` cloned it).
+out=$(run 'signal 0 19' 'kill 0' 'climit 0 1' 'nice 0 9' 'slice 0 1' 'limit 0 5' 'mood 0 tension 1.0' 'numb 0 9' 'feel 0 9' 'fg 0' 'fork' 'ps')
+echo "$out" | grep -q 'idle takes no signals' || { echo "FAIL: idle accepted a signal"; exit 1; }
+echo "$out" | grep -q 'idle cannot be killed' || { echo "FAIL: idle accepted a kill"; exit 1; }
+echo "$out" | grep -q 'idle takes no settings' || { echo "FAIL: idle accepted a scheduling knob"; exit 1; }
+echo "$out" | grep -q 'idle carries no weather' || { echo "FAIL: idle accepted a mood"; exit 1; }
+echo "$out" | grep -q 'idle cannot be brought to the foreground' || { echo "FAIL: idle became the actor"; exit 1; }
+echo "$out" | grep -qE '^0 +idle +(ready|running) +[0-9]+ +0 +0 ' || { echo "FAIL: idle left its own state"; exit 1; }
+[ "$(echo "$out" | grep -cE '^[0-9]+ +idle ')" = 1 ] || { echo "FAIL: idle was cloned"; exit 1; }
+
 out=$(run 'fortune oz')
 echo "$out" | grep -q . || { echo "FAIL: fortune oz"; exit 1; }
 

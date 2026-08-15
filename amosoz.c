@@ -51,6 +51,7 @@ static inline int safe_append(char *buf, int offset, int bufsz, const char *fmt,
 #define MAX_FILES 512
 #define MAX_BLOCKS 256
 #define MAX_MONADS 64
+#define IDLE_PID 0      /* the silence locus: reserved, always eligible, never chosen on merit */
 #define MAX_ORGANS 32
 #define MAX_ENV 64
 #define MAX_HISTORY 100
@@ -844,10 +845,31 @@ static void fs_init_tree(VirtualFS *fs) {
 }
 
 /* ─── Monad Table ───────────────────────────────────────────────────────── */
+static int monad_is_idle(const Monad *p) { return p->used && p->pid == IDLE_PID; }
+
+/* IDLE lives in the last slot so real monads keep the indices they always had. It is a
+ * citizen, not a hole: `ps` shows it, `current` names it, and when it holds the CPU the
+ * system is genuinely doing nothing — which is a state the kernel is allowed to be in. */
+static void monad_idle_init(MonadTable *pt) {
+    Monad *p = &pt->monads[MAX_MONADS-1];
+    p->pid = IDLE_PID;
+    p->ppid = IDLE_PID;
+    strcpy(p->name, "idle");
+    strcpy(p->state, "ready");
+    p->started = time(NULL);
+    p->used = 1;
+    strcpy(p->cwd, "/");
+    for (int f=0; f<32; f++) p->open_fds[f] = -1;
+    p->max_slice = 1;
+    p->mem_limit_kb = 0;
+    p->cpu_limit = 0;   /* never billed: idle burns no quantum it could exceed */
+}
+
 static void monad_table_init(MonadTable *pt) {
     memset(pt, 0, sizeof(MonadTable));
     pt->next_pid = 1;
     pt->sched_next = 0;
+    monad_idle_init(pt);
 }
 
 static int monad_spawn(MonadTable *pt, const char *name, int parent_pid) {
@@ -1197,6 +1219,7 @@ static int monad_choose(MonadTable *pt) {
     for (int k = 0; k < MAX_MONADS; k++) {
         int idx = (origin + k) % MAX_MONADS;
         Monad *p = &pt->monads[idx];
+        if (monad_is_idle(p)) continue;   /* the floor, not a competitor */
         if (!(p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)
               && p->cpu_time < p->cpu_limit)) continue;
         int is_cur = (p->pid == K.selected_pid);
@@ -1292,43 +1315,27 @@ static int monad_tick(MonadTable *pt) {
             }
         }
     }
-    /* primary selection is now governed by the AML resonance field. Priority still
-     * dominates; the field bends the choice among equal-priority ready monads (calm =
-     * round-robin, agitation = pressure/chamber/velocity). The never-none cascade below
-     * remains the guaranteed floor. */
+    /* a cpu limit is spent, not merely approached: a monad standing at its limit is stopped
+     * once and counted once, wherever it stands. This used to happen at selection time, and
+     * only fired at all because a fallback level picked monads that were already over. */
+    for (int i = 0; i < n; i++) {
+        Monad *p = &pt->monads[i];
+        if (!p->used || monad_is_idle(p)) continue;
+        if (p->cpu_time >= p->cpu_limit
+            && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0)) {
+            p->cpu_violations++;
+            strcpy(p->state, "stopped");
+        }
+    }
+
+    /* primary selection is governed by the AML resonance field. Priority still dominates;
+     * the field bends the choice among equal-priority ready monads (calm = round-robin,
+     * agitation = pressure/chamber/velocity). When nobody is eligible the kernel runs IDLE:
+     * the floor is a silence locus, not a rescue. Nothing blocked, stopped, zombie or over
+     * its limit is ever promoted to keep the seat warm. */
     int best_idx = monad_choose(pt);
-    if (best_idx < 0) {
-        /* full scan fallback for any ready under limit */
-        for (int i = 0; i < n; i++) {
-            Monad *p = &pt->monads[i];
-            if (p->used && (strcmp(p->state, "ready") == 0 || strcmp(p->state, "running") == 0) && p->cpu_time < p->cpu_limit) {
-                best_idx = i;
-                break;
-            }
-        }
-    }
-    if (best_idx < 0) {
-        /* last resort: any non-stopped under limit */
-        for (int i = 0; i < n; i++) {
-            Monad *p = &pt->monads[i];
-            if (p->used && strcmp(p->state, "stopped") != 0 && strcmp(p->state, "zombie") != 0 && p->cpu_time < p->cpu_limit) {
-                best_idx = i;
-                strcpy(p->state, "ready");
-                break;
-            }
-        }
-    }
-    if (best_idx < 0) {
-        /* absolute last: pick first ready and force */
-        for (int i = 0; i < n; i++) {
-            Monad *p = &pt->monads[i];
-            if (p->used && strcmp(p->state, "ready") == 0) {
-                best_idx = i;
-                break;
-            }
-        }
-    }
-    if (best_idx >= 0) {
+    if (best_idx < 0) best_idx = MAX_MONADS - 1;   /* IDLE */
+    {
         /* init reaps zombies automatically (minimal OS) */
         if (pt->monads[best_idx].pid == 1) {
             for (int z = 0; z < n; z++) {
@@ -1345,18 +1352,16 @@ static int monad_tick(MonadTable *pt) {
             }
         }
         Monad *p = &pt->monads[best_idx];
+        strcpy(p->state, "running");
+        p->ticks++;
+        K.selected_pid = p->pid;
 
-        /* enforce cpu limit - hardcore resource limit */
-        if (p->cpu_time >= p->cpu_limit) {
-            p->cpu_violations++;
-            strcpy(p->state, "stopped");
-            pt->sched_next = (best_idx + 1) % n;
-        } else {
-            strcpy(p->state, "running");
-            p->ticks++;
+        /* IDLE holds the seat and nothing else: no cpu billed, no slice spent, no mood
+         * discharged, no program run. A tick of silence is a tick in which the system did
+         * nothing, and says so. */
+        if (!monad_is_idle(p)) {
             p->cpu_time++;
             p->slice_used++;
-            K.selected_pid = p->pid;
             /* being served spends the argument: a monad that gets the CPU discharges its
              * mood toward calm. Without this a tense monad wins every round forever and
              * starves the rest — the field would not bend the scheduler, it would jam it. */
@@ -1373,55 +1378,25 @@ static int monad_tick(MonadTable *pt) {
                 p->slice_used = 0;
                 strcpy(p->state, "ready");
             }
+        }
 
-            pt->sched_next = (best_idx + 1) % n;
-            return pt->tick_count;
-        }
-    }
-    /* foundation guarantee: never 'none' or running=none. always pick or force a ready proc, set selected_pid, init reaps zombies */
-    int has_running = 0;
-    for (int i = 0; i < n; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "running") == 0) has_running = 1;
-    if (!has_running) {
-        int chosen = -1;
-        for (int i = 0; i < n && chosen < 0; i++) {
-            Monad *p = &pt->monads[i];
-            if (p->used && strcmp(p->state, "ready") == 0 && p->cpu_time < p->cpu_limit) chosen = i;
-        }
-        if (chosen < 0) {
-            for (int i = 0; i < n && chosen < 0; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "ready") == 0) chosen = i;
-        }
-        if (chosen < 0) {
-            for (int i = 0; i < n && chosen < 0; i++) if (pt->monads[i].used && strcmp(pt->monads[i].state, "zombie") != 0 && strcmp(pt->monads[i].state, "stopped") != 0) {
-                chosen = i;
-                strcpy(pt->monads[i].state, "ready");
-            }
-        }
-        if (chosen >= 0) {
-            Monad *p = &pt->monads[chosen];
-            strcpy(p->state, "running");
-            p->ticks++;
-            p->cpu_time++;
-            K.selected_pid = p->pid;
-            if (p->pid == 1) {
-                for (int z = 0; z < n; z++) if (pt->monads[z].used && strcmp(pt->monads[z].state, "zombie") == 0 && monad_is_orphan(pt, z)) { monad_release_program(&pt->monads[z]); pt->monads[z].used = 0; }
-            }
-        }
-    }
-    if (K.selected_pid <= 0) {
-        /* ultimate guarantee for foundation: force shell or init or first to keep OS alive (no none) */
-        int force = (K.shell_pid > 0 ? K.shell_pid : 1);
-        for (int i=0; i<n; i++) if (pt->monads[i].used && pt->monads[i].pid == force) {
-            strcpy(pt->monads[i].state, "running");
-            K.selected_pid = force;
-            break;
-        }
-        if (K.selected_pid <= 0) for (int i=0; i<n; i++) if (pt->monads[i].used) {
-            strcpy(pt->monads[i].state, "running");
-            K.selected_pid = pt->monads[i].pid;
-            break;
-        }
+        pt->sched_next = (best_idx + 1) % n;
     }
     return pt->tick_count;
+}
+
+/* The selection invariant, stated as a property rather than a sign: selected_pid names a
+ * used monad the kernel was allowed to run this tick — never stopped, blocked or zombie,
+ * never past its cpu limit. IDLE satisfies it by construction; nothing else is exempt. */
+static int kernel_selection_is_sound(void) {
+    for (int i = 0; i < MAX_MONADS; i++) {
+        Monad *p = &K.monads.monads[i];
+        if (!p->used || p->pid != K.selected_pid) continue;
+        if (strcmp(p->state, "running") != 0 && strcmp(p->state, "ready") != 0) return 0;
+        if (monad_is_idle(p)) return 1;
+        return p->cpu_time <= p->cpu_limit;
+    }
+    return 0;   /* selected_pid names nothing at all */
 }
 
 /* ─── OZ Wake ─────────────────────────────────────────────────────────────── */
@@ -2135,6 +2110,12 @@ static int cmd_fork(char *out, int sz, int argc, char **argv) {
 
 static int cmd_kill(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: kill <pid> | kill -s <sig> <pid>"); return ERR_INVALID; }
+    /* the silence locus outlives every citizen: without it the kernel has no legal answer to
+     * an empty run queue, and the old cascade would come back as a resurrection. */
+    if (atoi(argv[argc >= 4 && strcmp(argv[1], "-s") == 0 ? 3 : 1]) == IDLE_PID) {
+        snprintf(out, sz, "idle cannot be killed");
+        return ERR_INVALID;
+    }
     if (argc >= 4 && strcmp(argv[1], "-s") == 0) {
         int sig = atoi(argv[2]);
         int pid = atoi(argv[3]);
@@ -2327,6 +2308,9 @@ static int cmd_yield(char *out, int sz, int argc, char **argv) {
 static int cmd_nice(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: nice <pid> <prio>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    /* IDLE stands outside the scheduling arithmetic; a knob it does not obey would only make
+     * `ps` lie about it. */
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no settings"); return ERR_INVALID; }
     int prio = atoi(argv[2]);
     for (int i=0; i<MAX_MONADS; i++) {
         if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
@@ -2342,6 +2326,7 @@ static int cmd_nice(char *out, int sz, int argc, char **argv) {
 static int cmd_slice(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: slice <pid> <ticks>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no settings"); return ERR_INVALID; }
     int sl = atoi(argv[2]);
     if (sl <= 0) { snprintf(out, sz, "slice must be >0"); return ERR_INVALID; }
     for (int i=0; i<MAX_MONADS; i++) {
@@ -2359,6 +2344,7 @@ static int cmd_slice(char *out, int sz, int argc, char **argv) {
 static int cmd_limit(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: limit <pid> <kb>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no settings"); return ERR_INVALID; }
     int lim = atoi(argv[2]);
     if (lim <= 0) { snprintf(out, sz, "limit must be >0"); return ERR_INVALID; }
     for (int i=0; i<MAX_MONADS; i++) {
@@ -2375,6 +2361,7 @@ static int cmd_limit(char *out, int sz, int argc, char **argv) {
 static int cmd_climit(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: climit <pid> <ticks>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no settings"); return ERR_INVALID; }
     int lim = atoi(argv[2]);
     if (lim <= 0) { snprintf(out, sz, "climit must be >0"); return ERR_INVALID; }
     for (int i=0; i<MAX_MONADS; i++) {
@@ -2393,6 +2380,7 @@ static int cmd_signal(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: signal <pid> <sig>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
     int sig = atoi(argv[2]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no signals"); return ERR_INVALID; }
     for (int i=0; i<MAX_MONADS; i++) {
         if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             K.monads.monads[i].signals |= (1 << sig);
@@ -2414,6 +2402,7 @@ static int cmd_signal(char *out, int sz, int argc, char **argv) {
 static int cmd_numb(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: numb <pid> <sig>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no signals"); return ERR_INVALID; }
     int sig = atoi(argv[2]);
     if (sig == 9 || sig == 19) {
         snprintf(out, sz, "numb: sig %d pierces numbness — no monad is numb to its end", sig);
@@ -2433,6 +2422,7 @@ static int cmd_numb(char *out, int sz, int argc, char **argv) {
 static int cmd_feel(char *out, int sz, int argc, char **argv) {
     if (argc < 3) { snprintf(out, sz, "Usage: feel <pid> <sig>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle takes no signals"); return ERR_INVALID; }
     int sig = atoi(argv[2]);
     for (int i=0; i<MAX_MONADS; i++) {
         if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
@@ -2451,6 +2441,7 @@ static int cmd_feel(char *out, int sz, int argc, char **argv) {
 static int cmd_mood(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: mood <pid> [pain|tension|flow|warmth <value>]"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle carries no weather"); return ERR_INVALID; }
     Monad *p = NULL;
     for (int i = 0; i < MAX_MONADS; i++)
         if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) { p = &K.monads.monads[i]; break; }
@@ -3420,6 +3411,9 @@ static int cmd_jobs(char *out, int sz, int argc, char **argv) {
 static int cmd_fg(char *out, int sz, int argc, char **argv) {
     if (argc < 2) { snprintf(out, sz, "Usage: fg <pid>"); return ERR_INVALID; }
     int pid = atoi(argv[1]);
+    /* IDLE holds the seat, it does not hold a prompt: as an actor it would own a cwd, fds and
+     * children, and `fork` would clone the silence itself. */
+    if (pid == IDLE_PID) { snprintf(out, sz, "idle cannot be brought to the foreground"); return ERR_INVALID; }
     for (int i = 0; i < MAX_MONADS; i++) {
         if (K.monads.monads[i].used && K.monads.monads[i].pid == pid) {
             /* demote others, make fg running */
@@ -3564,10 +3558,51 @@ static int cmd_selftest(char *out, int sz, int argc, char **argv) {
     CHECK("contract_validation", organ_validate_contracts() == ERR_OK);
 
     /* current context */
-    CHECK("current_pid_set", K.selected_pid > 0);
+    /* `selected_pid > 0` was a proxy: pid 0 is now a legal answer, and the old check passed
+     * happily while the kernel pointed at a stopped monad. The property is what the selection
+     * claims — a live monad the kernel was allowed to run. */
+    CHECK("selection_sound", kernel_selection_is_sound());
     int cur_found = 0;
     for (int i=0; i<MAX_MONADS; i++) if (K.monads.monads[i].used && K.monads.monads[i].pid == K.selected_pid) cur_found = 1;
     CHECK("current_proc_exists", cur_found);
+
+    /* An empty run queue is a real state, not an emergency. With every citizen stopped the
+     * answer must be IDLE and nobody may be resurrected to fill the seat. Against the
+     * pre-IDLE build this fails: the cascade forced a stopped monad back to running. */
+    /* Two shapes of hard state, because they fail differently on the pre-IDLE build: with
+     * everyone stopped the old kernel left the seat on a dead row (selection unsound), and
+     * with a sleeper present it woke the sleeper instead (resurrection). One shape alone
+     * passes on the broken build. */
+    for (int mode = 0; mode < 2; mode++) {
+        char saved[MAX_MONADS][16];
+        int saved_sel = K.selected_pid;
+        int sleeper = -1;
+        for (int i=0; i<MAX_MONADS; i++) {
+            Monad *p = &K.monads.monads[i];
+            saved[i][0] = '\0';
+            if (!p->used || monad_is_idle(p)) continue;
+            strcpy(saved[i], p->state);
+            if (mode == 1 && sleeper < 0) { sleeper = i; strcpy(p->state, "blocked"); p->sleep_ticks = 9; }
+            else strcpy(p->state, "stopped");
+        }
+        monad_tick(&K.monads);
+        int resurrected = 0;
+        for (int i=0; i<MAX_MONADS; i++) {
+            Monad *p = &K.monads.monads[i];
+            if (!p->used || monad_is_idle(p)) continue;
+            const char *want = (i == sleeper) ? "blocked" : "stopped";
+            if (strcmp(p->state, want) != 0) resurrected = 1;
+        }
+        CHECK(mode ? "idle_when_only_sleepers_left" : "idle_when_nobody_eligible",
+              K.selected_pid == IDLE_PID && !resurrected);
+        CHECK(mode ? "selection_sound_sleepers_left" : "selection_sound_empty_queue",
+              kernel_selection_is_sound());
+        for (int i=0; i<MAX_MONADS; i++) if (saved[i][0]) {
+            strcpy(K.monads.monads[i].state, saved[i]);
+            if (i == sleeper) K.monads.monads[i].sleep_ticks = 0;
+        }
+        K.selected_pid = saved_sel;
+    }
 
     /* Memory + limits */
     int bid = mem_alloc(&K.mem, 100, 1, "rw-"); /* use init pid */

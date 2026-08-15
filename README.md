@@ -63,14 +63,14 @@ Core OS primitives (AMOS body):
 
 **AMOS (body)** — the concrete:
 - Per-process: pid/ppid, cwd, open_fds[32], owned_blocks + mem_used/limit, cpu_time/limit/violations, signals + numbness, priority, max_slice/slice_used, mailbox[256], state (ready/running/blocked/zombie/stopped).
-- Scheduler: priority + round-robin + time-slice preemption + hard cpu limits (violation + stop) + consolidated guarantee + ultimate force (shell/init) — never "none", always sets current_pid. Init reaps orphans only — a zombie whose parent is alive waits for that parent's `wait`.
+- Scheduler: priority + round-robin + time-slice preemption + hard cpu limits (violation + stop), and a reserved **IDLE** monad (pid 0) as the floor. The invariant is one line: the kernel either selects a monad it is allowed to run, or it runs IDLE — never a stopped, blocked, zombie or over-limit row. Init reaps orphans only — a zombie whose parent is alive waits for that parent's `wait`.
 - Memory: per-proc charge + hard limit enforced (strict, no global fallback).
 - FS + devices (null/zero/full/random/urandom/tty + console/mem) with per-proc fds; unified read path (cat /dev/* delivers), write specials.
 - Signals: delivery in tick, STOP/CONT/TERM/KILL + unblock on signal. **Numbness** (`numb` / `feel`) is the mask in this system's own register: a numbed signal is not lost, it stays pending until the monad feels again. Numbness is a property of the monad and outlives delivery; KILL and STOP pierce it.
 - Fork: full clone of cwd/fds/limits/priority/numbness/owned + child reset (signals/cpu_time/violations/slice=0). Exec: name replace + reset signals/numbness/sleep/slice/violations, keeps fds/cwd.
 - Rich /proc: top-level (uptime,meminfo,cpuinfo,version,self/status) + per-pid /status /fd /cpu /mem /stat /mailbox.
 - Ring wake — the trace every command leaves (head/count, last 256).
-- current_pid + shell_pid context everywhere (prompt, pwd, resolve, ownership, parent in spawn/fork/wait/exec, fg sticks via suppress).
+- actor_pid + shell_pid context everywhere (prompt, pwd, resolve, ownership, parent in spawn/fork/wait/exec, fg sticks via suppress). The actor is who a command speaks for; selected_pid is only whom the scheduler picked, and the two are not the same monad.
 - Auto time advance (main) + manual `tick`; fg suppresses auto-tick.
 
 **OZ (field)** — the extension layer (organs, slots, pulses, contracts, wake provenance) plus the live AML field: `am_init` at boot, `am_step(0.1)` per command, `monad_choose` reading the field each tick, `.soma` persistence across runs, and `.aml` programs running as monads. A calm field reduces exactly to priority + round-robin, so the body is unchanged when the weather is still.
@@ -96,12 +96,12 @@ Covers core: boot, fs, permissions, processes (spawn/kill/fork/wait/exec), sched
 
 **Foundation phase (AMOS body)** — done:
 - Per-process isolation + accounting (mem, fds, cpu time/limit/violations, signals+numbness).
-- Scheduler with real preemption (slices + priorities + cpu hard limits) + guarantee no 'none'.
+- Scheduler with real preemption (slices + priorities + cpu hard limits) + an IDLE floor instead of a rescue.
 - Lifecycle: fork (full clone), exec (replace), wait, kill, blocking (sleep/pause).
 - Signals + numbness (`numb` / `feel`) + delivery.
 - Devices (null/zero/full/random/urandom/tty + unified read/write) + rich /proc/<pid>/* .
 - Ring wake + IPC mailbox (send).
-- Current context everywhere: current_pid + shell_pid for ownership/parent/prompt/cwd in all paths; strict no-fallback mem.
+- Actor context everywhere: actor_pid + shell_pid for ownership/parent/prompt/cwd in all paths; strict no-fallback mem.
 - All in **one self-contained C file**.
 
 **Resonance:** AML field hosted and evolving, scheduler dissolved into it,
