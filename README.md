@@ -1,5 +1,7 @@
 # amos.oz — Arianna Method Operating System
 
+> **Read the [Arianna Method Manifesto](ARIANNA_METHOD_MANIFESTO.md) first.** This repository is governed by it; every instruction here, `CLAUDE.md` included, is subordinate to it.
+
 amosOZ is a single-file operating system: canonical in C (`amosoz.c`, v0.4.0), with parity forms in Python and HTML/JS under `reffs/`. `amosoz.c` is llm.c-grade for an OS — the whole algorithm in one file, nothing hidden behind a build graph. C selftest: 60/60 (`make test`). The reference forms track the AMOS body, not the resonance field yet — they were built before the field and numbness existed.
 
 Its shell treaty is its own contract, not POSIX. POSIX supplies the vocabulary; the semantics below are amosOZ's.
